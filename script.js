@@ -1,3 +1,9 @@
+/**
+ * 🌌 銀河手寫數字辨識系統 - 終極全功能整合版
+ * 整合：模型修復、語音控制、檔案上傳、銀河特效、即時鏡頭、進階分割
+ */
+
+// --- 1. 常數與全域變數 ---
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const video = document.getElementById('camera-feed');
@@ -10,67 +16,54 @@ const confDetails = document.getElementById('conf-details');
 
 const voiceBtn = document.getElementById('voiceBtn');
 const voiceStatus = document.getElementById('voice-status');
-let recognition = null;
-let isVoiceActive = false;
 
 let model = null;
 let isDrawing = false;
 let isEraser = false;
 let cameraStream = null;
 let realtimeInterval = null;
+let recognition = null;
+let isVoiceActive = false;
 
-// --- 🛠️ 超級修復載入器 V3 (Super Patch Loader) ---
+// --- 🛠️ 超級修復載入器 (Super Patch Loader) ---
+// 針對 TensorFlow.js 與 Keras 3.x 轉換後的相容性修補
 class PatchModelLoader {
     constructor(url) { this.url = url; }
     
     async load() {
-        // 1. 下載原始資料
         const loader = tf.io.browserHTTPRequest(this.url);
         const artifacts = await loader.load();
         
-        console.log("🛠️ 正在檢查模型結構與權重名稱...");
+        console.log("🛠️ 正在執行深度修復...");
 
-        // --- 修復 A: 注入缺失的 InputShape ---
-        let patchedShape = false;
+        // 修復 A: 注入 InputLayer 形狀
         const traverseAndPatch = (obj) => {
             if (!obj || typeof obj !== 'object') return;
             if (obj.class_name === 'InputLayer' && obj.config) {
                 const cfg = obj.config;
-                if (!cfg.batchInputShape && !cfg.batch_input_shape && !cfg.inputShape) {
-                    console.log(`🔧 [修復 A] 注入 InputLayer 形狀...`);
+                if (!cfg.batchInputShape && !cfg.batch_input_shape) {
+                    console.log(`🔧 [修復 A] 注入形狀 [null, 28, 28, 1]`);
                     cfg.batchInputShape = [null, 28, 28, 1];
-                    cfg.batch_input_shape = [null, 28, 28, 1];
-                    patchedShape = true;
                 }
             }
             if (Array.isArray(obj)) obj.forEach(item => traverseAndPatch(item));
             else Object.keys(obj).forEach(key => traverseAndPatch(obj[key]));
         };
-
         if (artifacts.modelTopology) traverseAndPatch(artifacts.modelTopology);
 
-        // --- 修復 B: 權重名稱標準化 (移除 sequential/ 前綴) ---
-        // 這解決 "Provided weight data has no target variable" 錯誤
-        let patchedWeights = false;
+        // 修復 B: 修正權重名稱 (移除 sequential/ 前綴)
         if (artifacts.weightSpecs) {
             artifacts.weightSpecs.forEach(spec => {
-                // 如果權重名稱包含 "sequential/" 但模型層可能沒有，我們嘗試移除前綴
-                if (spec.name.startsWith('sequential/')) {
-                    const oldName = spec.name;
-                    const newName = spec.name.replace('sequential/', '');
-                    spec.name = newName;
-                    console.log(`⚖️ [修復 B] 權重更名: ${oldName} -> ${newName}`);
-                    patchedWeights = true;
+                if (spec.name.includes('sequential/')) {
+                    spec.name = spec.name.replace('sequential/', '');
                 }
             });
         }
-
-        console.log(`✅ 修復報告: 形狀注入=${patchedShape}, 權重更名=${patchedWeights}`);
         return artifacts;
     }
 }
 
-// --- 1. 系統初始化 ---
+// --- 2. 系統初始化 ---
 async function init() {
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -82,36 +75,23 @@ async function init() {
 
     try {
         confDetails.innerText = "🌌 正在啟動銀河 AI 引擎...";
-
         await tf.setBackend('cpu');
         await tf.ready();
-        console.log("當前運行後端:", tf.getBackend());
 
-        try {
-            console.log("🚀 啟動 V3 自動修補載入程序...");
-            // 使用自定義載入器
-            model = await tf.loadLayersModel(new PatchModelLoader(modelUrl));
-            
-            console.log("✅✅✅ 模型載入成功！系統全線就緒！");
-            confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
-            
-            // 暖身預測 (Warm up)
-            tf.tidy(() => {
-                model.predict(tf.zeros([1, 28, 28, 1]));
-            });
-
-        } catch (err) {
-            console.error("載入嚴重失敗:", err);
-            confDetails.innerText = `❌ 錯誤: ${err.message}`;
-            throw err;
-        }
+        model = await tf.loadLayersModel(new PatchModelLoader(modelUrl));
         
-    } catch (finalErr) {
-        console.error("初始化錯誤:", finalErr);
+        console.log("✅ 系統全線就緒！");
+        confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
+        
+        // 暖身預測
+        tf.tidy(() => model.predict(tf.zeros([1, 28, 28, 1])));
+    } catch (err) {
+        console.error("初始化失敗:", err);
+        confDetails.innerHTML = `<span style="color:red">❌ 載入失敗: ${err.message}</span>`;
     }
 }
 
-// --- 2. 影像處理邏輯 ---
+// --- 3. 核心辨識與影像處理 ---
 function advancedPreprocess(roiCanvas) {
     return tf.tidy(() => {
         let tensor = tf.browser.fromPixels(roiCanvas, 1);
@@ -140,23 +120,20 @@ async function predict() {
         if (aspectRatio > 2.5 || aspectRatio < 0.15) continue;
 
         const roiCanvas = document.createElement('canvas');
-        roiCanvas.width = w;
-        roiCanvas.height = h;
+        roiCanvas.width = w; roiCanvas.height = h;
         const roiCtx = roiCanvas.getContext('2d');
         roiCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
 
-        // 分割連字邏輯
+        // --- 進階邏輯：分割寬度過大的連字 (如 11) ---
         if (w > h * 1.3) {
             const splitX = Math.floor(w / 2);
-            const subWidths = [splitX, w - splitX];
-            const subXOffsets = [0, splitX];
+            const widths = [splitX, w - splitX];
+            const offsets = [0, splitX];
 
             for (let i = 0; i < 2; i++) {
                 const subCanvas = document.createElement('canvas');
-                subCanvas.width = subWidths[i];
-                subCanvas.height = h;
-                const subCtx = subCanvas.getContext('2d');
-                subCtx.drawImage(roiCanvas, subXOffsets[i], 0, subWidths[i], h, 0, 0, subWidths[i], h);
+                subCanvas.width = widths[i]; subCanvas.height = h;
+                subCanvas.getContext('2d').drawImage(roiCanvas, offsets[i], 0, widths[i], h, 0, 0, widths[i], h);
                 
                 const input = advancedPreprocess(subCanvas);
                 const pred = model.predict(input);
@@ -173,6 +150,7 @@ async function predict() {
             continue;
         }
 
+        // 一般辨識
         const input = advancedPreprocess(roiCanvas);
         const pred = model.predict(input);
         const score = await pred.data();
@@ -191,69 +169,56 @@ async function predict() {
     updateDetails(details);
 
     if (cameraStream) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // 在鏡頭模式下繪製綠色偵測框
         validBoxes.forEach((box, i) => {
             ctx.strokeStyle = "#00FF00";
             ctx.lineWidth = 3;
             ctx.strokeRect(box.x, box.y, box.w, box.h);
-            ctx.fillStyle = "#00FF00";
-            ctx.font = "bold 24px Arial";
-            ctx.fillText(details[i].digit, box.x, box.y - 5);
         });
-        updatePen();
     }
-
-    if (finalRes !== "") addVisualFeedback("#2ecc71");
 }
 
+// 連通域算法：找尋獨立數字
 function findDigitBoxes(imageData) {
     const { data, width, height } = imageData;
     const visited = new Uint8Array(width * height);
     const boxes = [];
 
-    for (let y = 0; y < height; y += 4) {
-        for (let x = 0; x < width; x += 4) {
-            const idx = (y * width + x);
+    for (let y = 0; y < height; y += 5) {
+        for (let x = 0; x < width; x += 5) {
+            const idx = y * width + x;
             if (!visited[idx] && data[idx * 4] > 100) {
                 let minX = x, maxX = x, minY = y, maxY = y, count = 0;
-                const queue = [[x, y]];
+                let queue = [[x, y]];
                 visited[idx] = 1;
 
                 while (queue.length > 0) {
                     const [cx, cy] = queue.shift();
                     count++;
-                    if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
-                    if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
-
-                    const neighbors = [[cx+8, cy], [cx-8, cy], [cx, cy+8], [cx, cy-8]];
-                    for (let [nx, ny] of neighbors) {
+                    minX = Math.min(minX, cx); maxX = Math.max(maxX, cx);
+                    minY = Math.min(minY, cy); maxY = Math.max(maxY, cy);
+                    [[cx+10, cy], [cx-10, cy], [cx, cy+10], [cx, cy-10]].forEach(([nx, ny]) => {
                         if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                            const nIdx = (ny * width + nx);
+                            const nIdx = ny * width + nx;
                             if (!visited[nIdx] && data[nIdx * 4] > 100) {
-                                visited[nIdx] = 1;
-                                queue.push([nx, ny]);
+                                visited[nIdx] = 1; queue.push([nx, ny]);
                             }
                         }
-                    }
+                    });
                 }
-                boxes.push({ x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area: count * 16 });
+                boxes.push({ x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area: count * 25 });
             }
         }
     }
     return boxes.sort((a, b) => a.x - b.x);
 }
 
-// --- 3. UI 與事件 ---
-
+// --- 4. UI 視覺與互動功能 ---
 function addGalaxyEffects() {
-    setTimeout(() => {
-        if (!cameraStream) {
-            ctx.fillStyle = "rgba(163, 217, 255, 0.3)";
-            ctx.beginPath(); ctx.arc(650, 20, 3, 0, Math.PI * 2); ctx.fill();
-            ctx.beginPath(); ctx.arc(30, 300, 2, 0, Math.PI * 2); ctx.fill();
-            updatePen();
-        }
-    }, 500);
+    // 增加一些點綴星光
+    ctx.fillStyle = "rgba(163, 217, 255, 0.3)";
+    ctx.beginPath(); ctx.arc(600, 50, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(50, 350, 1.5, 0, Math.PI * 2); ctx.fill();
 }
 
 function updatePen() {
@@ -271,119 +236,88 @@ function toggleEraser() {
 
 function clearCanvas() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!cameraStream) { ctx.fillStyle = "black"; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+    ctx.fillStyle = "black"; ctx.fillRect(0, 0, canvas.width, canvas.height);
     digitDisplay.innerText = "---";
     addGalaxyEffects();
 }
 
-function addVisualFeedback(color) {
-    const buttons = document.querySelectorAll('button');
-    buttons.forEach(btn => {
-        const originalBoxShadow = btn.style.boxShadow;
-        btn.style.boxShadow = `0 0 20px ${color}`;
-        setTimeout(() => { btn.style.boxShadow = originalBoxShadow; }, 300);
-    });
-}
-
 async function toggleCamera() {
     if (cameraStream) {
-        stopCamera();
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+        video.style.display = "none";
+        camToggleBtn.innerText = "📷 開啟鏡頭";
+        clearInterval(realtimeInterval);
+        init(); 
     } else {
         try {
-            cameraStream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "environment", width: 1280, height: 720 },
-                audio: false
-            });
+            cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
             video.srcObject = cameraStream;
             video.style.display = "block";
-            mainBox.classList.add('cam-active');
-            camToggleBtn.innerHTML = '📷 關閉鏡頭';
-            realtimeInterval = setInterval(() => predict(), 400);
-            clearCanvas();
-        } catch (err) { alert("鏡頭啟動失敗: " + err); }
+            camToggleBtn.innerText = "📷 關閉鏡頭";
+            realtimeInterval = setInterval(() => predict(), 500);
+        } catch (err) { alert("鏡頭故障: " + err); }
     }
 }
 
-function stopCamera() {
-    if (cameraStream) { cameraStream.getTracks().forEach(track => track.stop()); cameraStream = null; }
-    if (realtimeInterval) clearInterval(realtimeInterval);
-    video.style.display = "none";
-    mainBox.classList.remove('cam-active');
-    camToggleBtn.innerHTML = '📷 開啟鏡頭';
-    init();
-}
-
-canvas.addEventListener('mousedown', startDrawing);
-canvas.addEventListener('mousemove', draw);
-canvas.addEventListener('mouseup', stopDrawing);
-canvas.addEventListener('touchstart', (e) => { if (e.touches.length === 1) startDrawing(e); });
-canvas.addEventListener('touchmove', (e) => { if (e.touches.length === 1) draw(e); });
-canvas.addEventListener('touchend', stopDrawing);
-
-function getCanvasCoordinates(e) {
-    const rect = canvas.getBoundingClientRect();
-    let x, y;
-    if (e.type.includes('touch')) {
-        x = e.touches[0].clientX - rect.left;
-        y = e.touches[0].clientY - rect.top;
-    } else {
-        x = e.clientX - rect.left; y = e.clientY - rect.top;
-    }
-    return { x, y };
-}
-
-function startDrawing(e) {
-    e.preventDefault(); isDrawing = true;
-    const { x, y } = getCanvasCoordinates(e);
-    ctx.beginPath(); ctx.moveTo(x, y);
-}
-
-function draw(e) {
-    e.preventDefault(); if (!isDrawing) return;
-    const { x, y } = getCanvasCoordinates(e);
-    ctx.lineTo(x, y); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(x, y);
-}
-
-function stopDrawing() {
-    if (isDrawing) { isDrawing = false; if (!cameraStream) setTimeout(() => predict(), 100); }
-}
-
+// 語音辨識初始化
 function initSpeechRecognition() {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-    recognition = new SpeechRecognition();
+    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Speech) return;
+    recognition = new Speech();
     recognition.lang = 'zh-TW';
-    recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        if (transcript.includes('清除')) clearCanvas();
+    recognition.onresult = (e) => {
+        const text = e.results[0][0].transcript;
+        if (text.includes('清除')) clearCanvas();
     };
 }
 
-function toggleVoice() { if (isVoiceActive) recognition.stop(); else recognition.start(); isVoiceActive = !isVoiceActive; }
+function toggleVoice() {
+    if (!recognition) return;
+    if (isVoiceActive) recognition.stop(); else recognition.start();
+    isVoiceActive = !isVoiceActive;
+    voiceBtn.classList.toggle('voice-active', isVoiceActive);
+}
 
+// 檔案上傳
 function triggerFile() { fileInput.click(); }
-function handleFile(event) {
-    const file = event.target.files[0];
-    if (!file) return;
+function handleFile(e) {
+    const file = e.target.files[0];
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = (event) => {
         const img = new Image();
         img.onload = () => {
-            ctx.fillStyle = "black"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(img, 50, 50, canvas.width - 100, canvas.height - 100);
+            clearCanvas();
+            ctx.drawImage(img, 50, 50, canvas.width-100, canvas.height-100);
             predict();
         };
-        img.src = e.target.result;
+        img.src = event.target.result;
     };
     reader.readAsDataURL(file);
 }
 
 function updateDetails(data) {
     let html = "<b>詳細辨識資訊：</b><br>";
-    if (data.length === 0) html += "等待有效數字入鏡...";
-    else data.forEach((item, i) => { html += `數字 ${i + 1}: <b style="color:#a3d9ff">${item.digit}</b> (${item.conf})<br>`; });
+    if (data.length === 0) html += "等待輸入...";
+    else data.forEach((item, i) => {
+        html += `數字 ${i+1}: <b style="color:#a3d9ff">${item.digit}</b> (${item.conf})<br>`;
+    });
     confDetails.innerHTML = html;
 }
+
+// --- 5. 事件監聽 ---
+function getPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+    const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+    return { x, y };
+}
+
+canvas.addEventListener('mousedown', (e) => { isDrawing = true; const p = getPos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); });
+canvas.addEventListener('mousemove', (e) => { if (!isDrawing) return; const p = getPos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); });
+canvas.addEventListener('mouseup', () => { isDrawing = false; predict(); });
+canvas.addEventListener('touchstart', (e) => { e.preventDefault(); isDrawing = true; const p = getPos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); });
+canvas.addEventListener('touchmove', (e) => { e.preventDefault(); if (!isDrawing) return; const p = getPos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); });
+canvas.addEventListener('touchend', () => { isDrawing = false; predict(); });
 
 init();
