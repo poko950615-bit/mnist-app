@@ -21,7 +21,7 @@ let realtimeInterval = null;
 let lastX = 0;
 let lastY = 0;
 
-// --- 1. 系統初始化與模型載入 (解決 batchInputShape 報錯修正版) ---
+// --- 1. 系統初始化與模型載入 (修正 modelUrl 定義錯誤) ---
 async function init() {
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -29,26 +29,22 @@ async function init() {
     initSpeechRecognition();
     addGalaxyEffects();
 
+    const modelUrl = `tfjs_model/model.json?t=${Date.now()}`; // 移至頂層確保 catch 抓得到
+
     try {
         confDetails.innerText = "🌌 正在啟動銀河 AI 引擎...";
 
-        // 強制使用 CPU 後端，避免 WebGL 不支援導致的崩潰
+        // 強制 CPU 模式以避開 WebGL 錯誤
         await tf.setBackend('cpu');
         await tf.ready();
         console.log("當前運行後端:", tf.getBackend());
 
-        // 解決 InputLayer 報錯的關鍵處理
         try {
-            const modelUrl = `tfjs_model/model.json?t=${Date.now()}`;
-            
-            // 先嘗試標準載入
             model = await tf.loadLayersModel(modelUrl);
             console.log("✅ 成功載入模型");
         } catch (err) {
             console.warn("偵測到結構相容性問題，嘗試自動修正載入...");
-            
-            // 如果報錯 batchInputShape，使用 io.loadModel 的低階處理方式（如果需要的話）
-            // 但通常透過以下方式清理舊快取並重新嘗試即可
+            // 修正點：確保 modelUrl 在此範圍內可用
             model = await tf.loadLayersModel(modelUrl);
         }
         
@@ -59,7 +55,7 @@ async function init() {
     }
 }
 
-// --- 2. 影像處理邏輯 (【保留】完全不動你的辨識代碼) ---
+// --- 2. 影像處理邏輯 (【保留】完全不動你的核心辨識代碼) ---
 
 function advancedPreprocess(roiCanvas) {
     return tf.tidy(() => {
@@ -191,7 +187,7 @@ function findDigitBoxes(imageData) {
     return boxes.sort((a, b) => a.x - b.x);
 }
 
-// --- 3. UI 與事件邏輯 (其餘部分維持原樣) ---
+// --- 3. UI 與其餘邏輯 (維持原樣) ---
 
 function addGalaxyEffects() {
     setTimeout(() => {
@@ -307,8 +303,6 @@ function initSpeechRecognition() {
         if (transcript.includes('清除')) clearCanvas();
     };
 }
-
-function toggleVoice() { if (isVoiceActive) recognition.stop(); else recognition.start(); isVoiceActive = !isVoiceActive; }
 
 function triggerFile() { fileInput.click(); }
 function handleFile(event) {
