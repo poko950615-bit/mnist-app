@@ -21,7 +21,40 @@ let realtimeInterval = null;
 let lastX = 0;
 let lastY = 0;
 
-// --- 1. 系統初始化與模型載入 (修正變數定義錯誤) ---
+// --- 🛠️ 定義一個特殊的加載器，用來修復模型結構問題 ---
+class PatchModelLoader {
+    constructor(url) { this.url = url; }
+    
+    async load() {
+        // 1. 使用標準 HTTP 載入器獲取檔案
+        const loader = tf.io.browserHTTPRequest(this.url);
+        const artifacts = await loader.load();
+        
+        // 2. 檢查並修補模型拓撲結構 (Topology)
+        if (artifacts.modelTopology) {
+            let layers = null;
+            // 尋找 layers 定義的位置 (不同版本結構略有不同)
+            if (artifacts.modelTopology.model_config && artifacts.modelTopology.model_config.config) {
+                layers = artifacts.modelTopology.model_config.config.layers;
+            } else if (artifacts.modelTopology.config && artifacts.modelTopology.config.layers) {
+                layers = artifacts.modelTopology.config.layers;
+            }
+
+            // 3. 如果找到 InputLayer 且缺失形狀定義，強制注入 MNIST 標準尺寸
+            if (layers && layers.length > 0 && layers[0].class_name === 'InputLayer') {
+                const config = layers[0].config;
+                if (!config.batchInputShape && !config.batch_input_shape && !config.inputShape && !config.input_shape) {
+                    console.log("🛠️ 系統自動修復：注入缺失的 Input Shape [null, 28, 28, 1]");
+                    // 注入標準 MNIST 形狀
+                    config.batchInputShape = [null, 28, 28, 1];
+                }
+            }
+        }
+        return artifacts;
+    }
+}
+
+// --- 1. 系統初始化 ---
 async function init() {
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -29,35 +62,42 @@ async function init() {
     initSpeechRecognition();
     addGalaxyEffects();
 
-    // 將變數宣告在最外層，確保整個 init 函式都能讀取
+    // 定義模型路徑
     const modelUrl = `tfjs_model/model.json?t=${Date.now()}`;
 
     try {
         confDetails.innerText = "🌌 正在啟動銀河 AI 引擎...";
 
-        // 強制 CPU 模式以避開 WebGL 錯誤
+        // 強制 CPU 模式
         await tf.setBackend('cpu');
         await tf.ready();
         console.log("當前運行後端:", tf.getBackend());
 
         try {
+            // 嘗試使用標準載入
             model = await tf.loadLayersModel(modelUrl);
-            console.log("✅ 成功載入模型");
+            console.log("✅ 成功載入模型 (標準模式)");
         } catch (err) {
-            console.warn("偵測到結構相容性問題，嘗試自動修正載入...");
-            // 修正點：此處現在可以正確存取 modelUrl
-            model = await tf.loadLayersModel(modelUrl);
+            console.warn("⚠️ 標準載入失敗，啟用自動修補模式...", err.message);
+            
+            // 使用我們自定義的 PatchLoader 進行修復載入
+            try {
+                model = await tf.loadLayersModel(new PatchModelLoader(modelUrl));
+                console.log("✅ 成功載入模型 (修補模式)");
+            } catch (patchErr) {
+                throw patchErr; // 如果修補後還失敗，拋出異常
+            }
         }
         
         confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
     } catch (finalErr) {
-        confDetails.innerText = "❌ 模型載入失敗：結構不相容";
-        console.error("載入失敗詳細資訊:", finalErr);
+        confDetails.innerText = "❌ 模型載入失敗";
+        console.error("最終載入錯誤:", finalErr);
+        alert("模型載入失敗，請檢查 Console 錯誤訊息");
     }
 }
 
-// --- 2. 影像處理邏輯 (【保留】完全不動你的核心辨識代碼) ---
-
+// --- 2. 影像處理邏輯 (保持不變) ---
 function advancedPreprocess(roiCanvas) {
     return tf.tidy(() => {
         let tensor = tf.browser.fromPixels(roiCanvas, 1);
@@ -188,7 +228,7 @@ function findDigitBoxes(imageData) {
     return boxes.sort((a, b) => a.x - b.x);
 }
 
-// --- 3. UI 與其他邏輯 (維持不變) ---
+// --- 3. UI 與事件邏輯 (保持不變) ---
 
 function addGalaxyEffects() {
     setTimeout(() => {
@@ -304,6 +344,8 @@ function initSpeechRecognition() {
         if (transcript.includes('清除')) clearCanvas();
     };
 }
+
+function toggleVoice() { if (isVoiceActive) recognition.stop(); else recognition.start(); isVoiceActive = !isVoiceActive; }
 
 function triggerFile() { fileInput.click(); }
 function handleFile(event) {
