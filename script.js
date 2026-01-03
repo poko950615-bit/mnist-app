@@ -21,7 +21,7 @@ let realtimeInterval = null;
 let lastX = 0;
 let lastY = 0;
 
-// --- 1. 系統初始化與模型載入 (針對截圖報錯進行最強相容性修正) ---
+// --- 1. 系統初始化與模型載入 (針對 WebGL 與 producer 報錯修正) ---
 async function init() {
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -31,37 +31,39 @@ async function init() {
 
     try {
         confDetails.innerText = "🌌 正在啟動銀河 AI 引擎...";
-        
-        // 解決 WebGL 支援問題：如果 WebGL 失敗，自動切換到 CPU 模式
+
+        // 解決 WebGL 不支援問題：強制檢查並切換後端
         try {
             await tf.setBackend('webgl');
+            await tf.ready();
         } catch (e) {
-            console.warn("設備不支援 WebGL，切換至 CPU 模式");
+            console.warn("WebGL 啟動失敗，切換至 CPU 模式運算");
             await tf.setBackend('cpu');
+            await tf.ready();
         }
-        await tf.ready();
 
-        // 解決模型載入報錯：
-        // 我們先嘗試最標準的 loadLayersModel，這是 Keras 轉換後的標準格式
+        console.log("當前運行後端:", tf.getBackend());
+
+        // 解決模型載入報錯：嚴格路徑與格式載入
         try {
+            // 第一優先：LayersModel (標準 Keras 格式)
             model = await tf.loadLayersModel('tfjs_model/model.json');
-            console.log("✅ 模型載入成功 (LayersModel)");
+            console.log("✅ 成功以 LayersModel 載入模型");
         } catch (err) {
-            console.error("LayersModel 嘗試失敗:", err);
-            confDetails.innerText = "⚠️ 正在嘗試備用載入模式...";
-            // 備用嘗試
+            console.warn("LayersModel 載入嘗試失敗，嘗試備用模式...");
+            // 第二優先：GraphModel (如果模型曾被優化過)
             model = await tf.loadGraphModel('tfjs_model/model.json');
-            console.log("✅ 模型載入成功 (GraphModel)");
+            console.log("✅ 成功以 GraphModel 載入模型");
         }
         
         confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
-    } catch (err) {
-        confDetails.innerText = "❌ 模型載入失敗：請確認 .bin 檔案是否與 .json 放在一起";
-        console.error("最終載入錯誤報告:", err);
+    } catch (finalErr) {
+        confDetails.innerText = "❌ 模型載入失敗：請確認 tfjs_model 資料夾內是否有 .bin 權重檔";
+        console.error("模型載入終極錯誤報告:", finalErr);
     }
 }
 
-// --- 2. 影像處理邏輯 (保留您原有的辨識邏輯，完全不動) ---
+// --- 2. 影像處理邏輯 (保留您原有的辨識部分，完全不動) ---
 
 function advancedPreprocess(roiCanvas) {
     return tf.tidy(() => {
@@ -193,7 +195,7 @@ function findDigitBoxes(imageData) {
     return boxes.sort((a, b) => a.x - b.x);
 }
 
-// --- 3. 視覺特效與 UI 控制 (完全保留) ---
+// --- 3. 視覺特效與 UI 控制 (保留) ---
 
 function addGalaxyEffects() {
     setTimeout(() => {
@@ -279,7 +281,7 @@ function stopCamera() {
     init();
 }
 
-// --- 4. 繪圖與觸控事件 (完全保留) ---
+// --- 4. 繪圖與觸控事件 (保留) ---
 
 canvas.addEventListener('mousedown', startDrawing);
 canvas.addEventListener('mousemove', draw);
@@ -348,7 +350,7 @@ function addDrawingEffect(x, y) {
     setTimeout(() => effect.remove(), 500);
 }
 
-// --- 5. 語音、檔案與細節 (完全保留) ---
+// --- 5. 語音與 UI 詳情 (保留) ---
 
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -416,5 +418,5 @@ function updateDetails(data) {
     confDetails.innerHTML = html;
 }
 
-// 啟動程序
+// 執行
 init();
