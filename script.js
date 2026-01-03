@@ -19,56 +19,53 @@ let isEraser = false;
 let cameraStream = null;
 let realtimeInterval = null;
 
-// --- 🛠️ 強力修復載入器 (Enhanced Patch Loader) ---
+// --- 🛠️ 超級修復載入器 V3 (Super Patch Loader) ---
 class PatchModelLoader {
     constructor(url) { this.url = url; }
     
     async load() {
-        // 1. 使用官方加載器獲取原始資料 (包含 JSON 和權重)
+        // 1. 下載原始資料
         const loader = tf.io.browserHTTPRequest(this.url);
         const artifacts = await loader.load();
         
-        console.log("🛠️ 正在檢查模型結構...", artifacts);
+        console.log("🛠️ 正在檢查模型結構與權重名稱...");
 
-        // 2. 遞迴尋找並修復 InputLayer
-        let patched = false;
-        
-        // 輔助函數：深入遍歷 JSON 物件
+        // --- 修復 A: 注入缺失的 InputShape ---
+        let patchedShape = false;
         const traverseAndPatch = (obj) => {
             if (!obj || typeof obj !== 'object') return;
-
-            // 如果找到 InputLayer 配置
             if (obj.class_name === 'InputLayer' && obj.config) {
                 const cfg = obj.config;
-                // 檢查是否缺失形狀定義
                 if (!cfg.batchInputShape && !cfg.batch_input_shape && !cfg.inputShape) {
-                    console.log(`🔧 發現 InputLayer 缺失形狀，正在注入 [null, 28, 28, 1]...`);
-                    // 強制注入兩種常見命名格式，確保萬無一失
+                    console.log(`🔧 [修復 A] 注入 InputLayer 形狀...`);
                     cfg.batchInputShape = [null, 28, 28, 1];
                     cfg.batch_input_shape = [null, 28, 28, 1];
-                    patched = true;
+                    patchedShape = true;
                 }
             }
-
-            // 如果找到 layers 陣列 (通常在 Sequential 模型)
-            if (Array.isArray(obj)) {
-                obj.forEach(item => traverseAndPatch(item));
-            } else {
-                // 繼續往深層找
-                Object.keys(obj).forEach(key => traverseAndPatch(obj[key]));
-            }
+            if (Array.isArray(obj)) obj.forEach(item => traverseAndPatch(item));
+            else Object.keys(obj).forEach(key => traverseAndPatch(obj[key]));
         };
 
-        if (artifacts.modelTopology) {
-            traverseAndPatch(artifacts.modelTopology);
+        if (artifacts.modelTopology) traverseAndPatch(artifacts.modelTopology);
+
+        // --- 修復 B: 權重名稱標準化 (移除 sequential/ 前綴) ---
+        // 這解決 "Provided weight data has no target variable" 錯誤
+        let patchedWeights = false;
+        if (artifacts.weightSpecs) {
+            artifacts.weightSpecs.forEach(spec => {
+                // 如果權重名稱包含 "sequential/" 但模型層可能沒有，我們嘗試移除前綴
+                if (spec.name.startsWith('sequential/')) {
+                    const oldName = spec.name;
+                    const newName = spec.name.replace('sequential/', '');
+                    spec.name = newName;
+                    console.log(`⚖️ [修復 B] 權重更名: ${oldName} -> ${newName}`);
+                    patchedWeights = true;
+                }
+            });
         }
 
-        if (patched) {
-            console.log("✅ 模型結構修復完成，提交給 TensorFlow 核心。");
-        } else {
-            console.warn("⚠️ 未找到可修復的 InputLayer，可能模型結構較為特殊。");
-        }
-
+        console.log(`✅ 修復報告: 形狀注入=${patchedShape}, 權重更名=${patchedWeights}`);
         return artifacts;
     }
 }
@@ -86,20 +83,26 @@ async function init() {
     try {
         confDetails.innerText = "🌌 正在啟動銀河 AI 引擎...";
 
-        // 強制 CPU 模式
         await tf.setBackend('cpu');
         await tf.ready();
         console.log("當前運行後端:", tf.getBackend());
 
-        // 使用我們自定義的 PatchLoader 進行載入
         try {
-            console.log("🚀 啟動自動修補載入程序...");
+            console.log("🚀 啟動 V3 自動修補載入程序...");
+            // 使用自定義載入器
             model = await tf.loadLayersModel(new PatchModelLoader(modelUrl));
-            console.log("✅ 成功載入模型 (修補模式)");
+            
+            console.log("✅✅✅ 模型載入成功！系統全線就緒！");
             confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
+            
+            // 暖身預測 (Warm up)
+            tf.tidy(() => {
+                model.predict(tf.zeros([1, 28, 28, 1]));
+            });
+
         } catch (err) {
             console.error("載入嚴重失敗:", err);
-            confDetails.innerText = "❌ 模型載入失敗 (請檢查 F12 Console)";
+            confDetails.innerText = `❌ 錯誤: ${err.message}`;
             throw err;
         }
         
@@ -142,6 +145,7 @@ async function predict() {
         const roiCtx = roiCanvas.getContext('2d');
         roiCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
 
+        // 分割連字邏輯
         if (w > h * 1.3) {
             const splitX = Math.floor(w / 2);
             const subWidths = [splitX, w - splitX];
