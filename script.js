@@ -18,38 +18,57 @@ let isDrawing = false;
 let isEraser = false;
 let cameraStream = null;
 let realtimeInterval = null;
-let lastX = 0;
-let lastY = 0;
 
-// --- 🛠️ 定義一個特殊的加載器，用來修復模型結構問題 ---
+// --- 🛠️ 強力修復載入器 (Enhanced Patch Loader) ---
 class PatchModelLoader {
     constructor(url) { this.url = url; }
     
     async load() {
-        // 1. 使用標準 HTTP 載入器獲取檔案
+        // 1. 使用官方加載器獲取原始資料 (包含 JSON 和權重)
         const loader = tf.io.browserHTTPRequest(this.url);
         const artifacts = await loader.load();
         
-        // 2. 檢查並修補模型拓撲結構 (Topology)
-        if (artifacts.modelTopology) {
-            let layers = null;
-            // 尋找 layers 定義的位置 (不同版本結構略有不同)
-            if (artifacts.modelTopology.model_config && artifacts.modelTopology.model_config.config) {
-                layers = artifacts.modelTopology.model_config.config.layers;
-            } else if (artifacts.modelTopology.config && artifacts.modelTopology.config.layers) {
-                layers = artifacts.modelTopology.config.layers;
-            }
+        console.log("🛠️ 正在檢查模型結構...", artifacts);
 
-            // 3. 如果找到 InputLayer 且缺失形狀定義，強制注入 MNIST 標準尺寸
-            if (layers && layers.length > 0 && layers[0].class_name === 'InputLayer') {
-                const config = layers[0].config;
-                if (!config.batchInputShape && !config.batch_input_shape && !config.inputShape && !config.input_shape) {
-                    console.log("🛠️ 系統自動修復：注入缺失的 Input Shape [null, 28, 28, 1]");
-                    // 注入標準 MNIST 形狀
-                    config.batchInputShape = [null, 28, 28, 1];
+        // 2. 遞迴尋找並修復 InputLayer
+        let patched = false;
+        
+        // 輔助函數：深入遍歷 JSON 物件
+        const traverseAndPatch = (obj) => {
+            if (!obj || typeof obj !== 'object') return;
+
+            // 如果找到 InputLayer 配置
+            if (obj.class_name === 'InputLayer' && obj.config) {
+                const cfg = obj.config;
+                // 檢查是否缺失形狀定義
+                if (!cfg.batchInputShape && !cfg.batch_input_shape && !cfg.inputShape) {
+                    console.log(`🔧 發現 InputLayer 缺失形狀，正在注入 [null, 28, 28, 1]...`);
+                    // 強制注入兩種常見命名格式，確保萬無一失
+                    cfg.batchInputShape = [null, 28, 28, 1];
+                    cfg.batch_input_shape = [null, 28, 28, 1];
+                    patched = true;
                 }
             }
+
+            // 如果找到 layers 陣列 (通常在 Sequential 模型)
+            if (Array.isArray(obj)) {
+                obj.forEach(item => traverseAndPatch(item));
+            } else {
+                // 繼續往深層找
+                Object.keys(obj).forEach(key => traverseAndPatch(obj[key]));
+            }
+        };
+
+        if (artifacts.modelTopology) {
+            traverseAndPatch(artifacts.modelTopology);
         }
+
+        if (patched) {
+            console.log("✅ 模型結構修復完成，提交給 TensorFlow 核心。");
+        } else {
+            console.warn("⚠️ 未找到可修復的 InputLayer，可能模型結構較為特殊。");
+        }
+
         return artifacts;
     }
 }
@@ -62,7 +81,6 @@ async function init() {
     initSpeechRecognition();
     addGalaxyEffects();
 
-    // 定義模型路徑
     const modelUrl = `tfjs_model/model.json?t=${Date.now()}`;
 
     try {
@@ -73,31 +91,24 @@ async function init() {
         await tf.ready();
         console.log("當前運行後端:", tf.getBackend());
 
+        // 使用我們自定義的 PatchLoader 進行載入
         try {
-            // 嘗試使用標準載入
-            model = await tf.loadLayersModel(modelUrl);
-            console.log("✅ 成功載入模型 (標準模式)");
+            console.log("🚀 啟動自動修補載入程序...");
+            model = await tf.loadLayersModel(new PatchModelLoader(modelUrl));
+            console.log("✅ 成功載入模型 (修補模式)");
+            confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
         } catch (err) {
-            console.warn("⚠️ 標準載入失敗，啟用自動修補模式...", err.message);
-            
-            // 使用我們自定義的 PatchLoader 進行修復載入
-            try {
-                model = await tf.loadLayersModel(new PatchModelLoader(modelUrl));
-                console.log("✅ 成功載入模型 (修補模式)");
-            } catch (patchErr) {
-                throw patchErr; // 如果修補後還失敗，拋出異常
-            }
+            console.error("載入嚴重失敗:", err);
+            confDetails.innerText = "❌ 模型載入失敗 (請檢查 F12 Console)";
+            throw err;
         }
         
-        confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
     } catch (finalErr) {
-        confDetails.innerText = "❌ 模型載入失敗";
-        console.error("最終載入錯誤:", finalErr);
-        alert("模型載入失敗，請檢查 Console 錯誤訊息");
+        console.error("初始化錯誤:", finalErr);
     }
 }
 
-// --- 2. 影像處理邏輯 (保持不變) ---
+// --- 2. 影像處理邏輯 ---
 function advancedPreprocess(roiCanvas) {
     return tf.tidy(() => {
         let tensor = tf.browser.fromPixels(roiCanvas, 1);
@@ -228,7 +239,7 @@ function findDigitBoxes(imageData) {
     return boxes.sort((a, b) => a.x - b.x);
 }
 
-// --- 3. UI 與事件邏輯 (保持不變) ---
+// --- 3. UI 與事件 ---
 
 function addGalaxyEffects() {
     setTimeout(() => {
