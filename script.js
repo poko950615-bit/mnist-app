@@ -21,7 +21,7 @@ let realtimeInterval = null;
 let lastX = 0;
 let lastY = 0;
 
-// --- 1. 系統初始化與模型載入 ---
+// --- 1. 系統初始化與模型載入 (針對你的報錯進行了強化修正) ---
 async function init() {
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -31,16 +31,26 @@ async function init() {
 
     try {
         confDetails.innerText = "🌌 正在連接銀河模型伺服器...";
-        // 請確保您的伺服器/路徑下有 tfjs_model 資料夾
-        model = await tf.loadLayersModel('tfjs_model/model.json');
+        
+        // 嘗試方法 A: 以 LayersModel 載入 (標準 Keras 轉換)
+        try {
+            model = await tf.loadLayersModel('tfjs_model/model.json');
+            console.log("模型載入成功 (LayersModel)");
+        } catch (layerErr) {
+            console.warn("LayersModel 載入失敗，嘗試 GraphModel...");
+            // 嘗試方法 B: 以 GraphModel 載入 (解決 InputLayer 遺失報錯)
+            model = await tf.loadGraphModel('tfjs_model/model.json');
+            console.log("模型載入成功 (GraphModel)");
+        }
+        
         confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
     } catch (err) {
         confDetails.innerText = "❌ 模型載入失敗，請確認 tfjs_model 資料夾與路徑";
-        console.error(err);
+        console.error("最終載入錯誤:", err);
     }
 }
 
-// --- 2. 影像處理邏輯 (將 p.py 的 Python 邏輯完整轉化為 JS) ---
+// --- 2. 影像處理邏輯 ---
 
 /**
  * 高級預處理：對應 p.py 的 advanced_preprocess
@@ -55,53 +65,45 @@ function advancedPreprocess(roiCanvas) {
         tensor = tensor.toFloat().div(tf.scalar(255.0));
         
         // 2. 調整大小至 28x28 (對應 cv2.resize)
-        // MNIST 訓練數據通常數字佔比約 20x20，並居中在 28x28
         tensor = tf.image.resizeBilinear(tensor, [28, 28]);
         
-        // 3. 模擬質心校正 (簡化版：確保數字在中央)
-        // 這裡直接 reshape 成 [1, 28, 28, 1]
+        // 3. 確保維度為 [1, 28, 28, 1]
         return tensor.expandDims(0);
     });
 }
 
 /**
- * 核心預測函式：對應 p.py 的 predict 路由
- * 包含：背景反轉、雜訊過濾、連通區域偵測
+ * 核心預測函式
  */
 async function predict() {
     if (!model) return;
 
-    // 獲取目前畫布數據
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    
-    // 這裡我們實作一個前端的「連通區域尋找」邏輯，用來找到數字的邊框
     const boxes = findDigitBoxes(imageData);
     
     let finalRes = "";
     let details = [];
     let validBoxes = [];
 
-    // 模擬 p.py 的過濾與預測循環
     for (let box of boxes) {
         const { x, y, w, h, area } = box;
 
-        // --- 強力過濾邏輯 (完全對應 p.py) ---
+        // 強力過濾邏輯
         const MIN_AREA = cameraStream ? 500 : 150;
         if (area < MIN_AREA) continue;
         
         const aspectRatio = w / h;
         if (aspectRatio > 2.5 || aspectRatio < 0.15) continue;
 
-        // 裁切數字區域 (ROI)
+        // 裁切 ROI
         const roiCanvas = document.createElement('canvas');
         roiCanvas.width = w;
         roiCanvas.height = h;
         const roiCtx = roiCanvas.getContext('2d');
         roiCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
 
-        // 處理連體字 (對應 p.py: if w > h * 1.3)
+        // 處理連體字
         if (w > h * 1.3) {
-            // 進行垂直投影切割
             const splitX = Math.floor(w / 2);
             const subWidths = [splitX, w - splitX];
             const subXOffsets = [0, splitX];
@@ -143,11 +145,9 @@ async function predict() {
         input.dispose(); pred.dispose();
     }
 
-    // 更新介面
     digitDisplay.innerText = finalRes || "---";
     updateDetails(details);
 
-    // 如果相機開啟，畫出偵測框
     if (cameraStream) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         validBoxes.forEach((box, i) => {
@@ -165,20 +165,18 @@ async function predict() {
 }
 
 /**
- * 前端實現的連通區域分析 (模擬 cv2.connectedComponentsWithStats)
+ * 連通區域分析 (BFS 演算法)
  */
 function findDigitBoxes(imageData) {
     const { data, width, height } = imageData;
     const visited = new Uint8Array(width * height);
     const boxes = [];
 
-    for (let y = 0; y < height; y += 4) { // 跳躍式掃描提高效能
+    for (let y = 0; y < height; y += 4) {
         for (let x = 0; x < width; x += 4) {
             const idx = (y * width + x);
-            if (!visited[idx] && data[idx * 4] > 100) { // 碰到白色像素
+            if (!visited[idx] && data[idx * 4] > 100) {
                 let minX = x, maxX = x, minY = y, maxY = y, count = 0;
-                
-                // 簡易種子填充 (BFS)
                 const queue = [[x, y]];
                 visited[idx] = 1;
 
@@ -203,10 +201,10 @@ function findDigitBoxes(imageData) {
             }
         }
     }
-    return boxes.sort((a, b) => a.x - b.x); // 按從左到右排序
+    return boxes.sort((a, b) => a.x - b.x);
 }
 
-// --- 3. 視覺特效與 UI 控制 (原 script.js 全部內容) ---
+// --- 3. 視覺特效與 UI 控制 ---
 
 function addGalaxyEffects() {
     setTimeout(() => {
@@ -431,4 +429,5 @@ function updateDetails(data) {
     confDetails.innerHTML = html;
 }
 
+// 執行初始化
 init();
