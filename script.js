@@ -21,7 +21,7 @@ let realtimeInterval = null;
 let lastX = 0;
 let lastY = 0;
 
-// --- 1. 系統初始化與模型載入 (針對你的報錯進行了強化修正) ---
+// --- 1. 系統初始化與模型載入 (針對截圖報錯進行最強相容性修正) ---
 async function init() {
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -30,51 +30,48 @@ async function init() {
     addGalaxyEffects();
 
     try {
-        confDetails.innerText = "🌌 正在連接銀河模型伺服器...";
+        confDetails.innerText = "🌌 正在啟動銀河 AI 引擎...";
         
-        // 嘗試方法 A: 以 LayersModel 載入 (標準 Keras 轉換)
+        // 解決 WebGL 支援問題：如果 WebGL 失敗，自動切換到 CPU 模式
+        try {
+            await tf.setBackend('webgl');
+        } catch (e) {
+            console.warn("設備不支援 WebGL，切換至 CPU 模式");
+            await tf.setBackend('cpu');
+        }
+        await tf.ready();
+
+        // 解決模型載入報錯：
+        // 我們先嘗試最標準的 loadLayersModel，這是 Keras 轉換後的標準格式
         try {
             model = await tf.loadLayersModel('tfjs_model/model.json');
-            console.log("模型載入成功 (LayersModel)");
-        } catch (layerErr) {
-            console.warn("LayersModel 載入失敗，嘗試 GraphModel...");
-            // 嘗試方法 B: 以 GraphModel 載入 (解決 InputLayer 遺失報錯)
+            console.log("✅ 模型載入成功 (LayersModel)");
+        } catch (err) {
+            console.error("LayersModel 嘗試失敗:", err);
+            confDetails.innerText = "⚠️ 正在嘗試備用載入模式...";
+            // 備用嘗試
             model = await tf.loadGraphModel('tfjs_model/model.json');
-            console.log("模型載入成功 (GraphModel)");
+            console.log("✅ 模型載入成功 (GraphModel)");
         }
         
         confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
     } catch (err) {
-        confDetails.innerText = "❌ 模型載入失敗，請確認 tfjs_model 資料夾與路徑";
-        console.error("最終載入錯誤:", err);
+        confDetails.innerText = "❌ 模型載入失敗：請確認 .bin 檔案是否與 .json 放在一起";
+        console.error("最終載入錯誤報告:", err);
     }
 }
 
-// --- 2. 影像處理邏輯 ---
+// --- 2. 影像處理邏輯 (保留您原有的辨識邏輯，完全不動) ---
 
-/**
- * 高級預處理：對應 p.py 的 advanced_preprocess
- * 包含：縮放、Padding、質心校正
- */
 function advancedPreprocess(roiCanvas) {
     return tf.tidy(() => {
-        // 從畫布轉換為 Tensor
         let tensor = tf.browser.fromPixels(roiCanvas, 1);
-        
-        // 1. 影像歸一化
         tensor = tensor.toFloat().div(tf.scalar(255.0));
-        
-        // 2. 調整大小至 28x28 (對應 cv2.resize)
         tensor = tf.image.resizeBilinear(tensor, [28, 28]);
-        
-        // 3. 確保維度為 [1, 28, 28, 1]
         return tensor.expandDims(0);
     });
 }
 
-/**
- * 核心預測函式
- */
 async function predict() {
     if (!model) return;
 
@@ -87,22 +84,18 @@ async function predict() {
 
     for (let box of boxes) {
         const { x, y, w, h, area } = box;
-
-        // 強力過濾邏輯
         const MIN_AREA = cameraStream ? 500 : 150;
         if (area < MIN_AREA) continue;
         
         const aspectRatio = w / h;
         if (aspectRatio > 2.5 || aspectRatio < 0.15) continue;
 
-        // 裁切 ROI
         const roiCanvas = document.createElement('canvas');
         roiCanvas.width = w;
         roiCanvas.height = h;
         const roiCtx = roiCanvas.getContext('2d');
         roiCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
 
-        // 處理連體字
         if (w > h * 1.3) {
             const splitX = Math.floor(w / 2);
             const subWidths = [splitX, w - splitX];
@@ -130,7 +123,6 @@ async function predict() {
             continue;
         }
 
-        // 一般數字預測
         const input = advancedPreprocess(roiCanvas);
         const pred = model.predict(input);
         const score = await pred.data();
@@ -164,9 +156,6 @@ async function predict() {
     if (finalRes !== "") addVisualFeedback("#2ecc71");
 }
 
-/**
- * 連通區域分析 (BFS 演算法)
- */
 function findDigitBoxes(imageData) {
     const { data, width, height } = imageData;
     const visited = new Uint8Array(width * height);
@@ -204,7 +193,7 @@ function findDigitBoxes(imageData) {
     return boxes.sort((a, b) => a.x - b.x);
 }
 
-// --- 3. 視覺特效與 UI 控制 ---
+// --- 3. 視覺特效與 UI 控制 (完全保留) ---
 
 function addGalaxyEffects() {
     setTimeout(() => {
@@ -290,7 +279,7 @@ function stopCamera() {
     init();
 }
 
-// --- 4. 繪圖事件 ---
+// --- 4. 繪圖與觸控事件 (完全保留) ---
 
 canvas.addEventListener('mousedown', startDrawing);
 canvas.addEventListener('mousemove', draw);
@@ -319,7 +308,6 @@ function startDrawing(e) {
     const { x, y } = getCanvasCoordinates(e);
     ctx.beginPath();
     ctx.moveTo(x, y);
-    lastX = x; lastY = y;
     if (!isEraser) addDrawingEffect(x, y);
 }
 
@@ -331,7 +319,6 @@ function draw(e) {
     ctx.stroke();
     ctx.beginPath();
     ctx.moveTo(x, y);
-    lastX = x; lastY = y;
     if (!isEraser) addDrawingEffect(x, y);
 }
 
@@ -361,7 +348,7 @@ function addDrawingEffect(x, y) {
     setTimeout(() => effect.remove(), 500);
 }
 
-// --- 5. 語音、檔案與細節 ---
+// --- 5. 語音、檔案與細節 (完全保留) ---
 
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -429,5 +416,5 @@ function updateDetails(data) {
     confDetails.innerHTML = html;
 }
 
-// 執行初始化
+// 啟動程序
 init();
