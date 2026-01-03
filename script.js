@@ -21,7 +21,7 @@ let realtimeInterval = null;
 let lastX = 0;
 let lastY = 0;
 
-// --- 1. 系統初始化與模型載入 (修正 modelUrl 定義錯誤) ---
+// --- 1. 系統初始化與模型載入 (修正變數定義錯誤) ---
 async function init() {
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -29,7 +29,8 @@ async function init() {
     initSpeechRecognition();
     addGalaxyEffects();
 
-    const modelUrl = `tfjs_model/model.json?t=${Date.now()}`; // 移至頂層確保 catch 抓得到
+    // 將變數宣告在最外層，確保整個 init 函式都能讀取
+    const modelUrl = `tfjs_model/model.json?t=${Date.now()}`;
 
     try {
         confDetails.innerText = "🌌 正在啟動銀河 AI 引擎...";
@@ -44,7 +45,7 @@ async function init() {
             console.log("✅ 成功載入模型");
         } catch (err) {
             console.warn("偵測到結構相容性問題，嘗試自動修正載入...");
-            // 修正點：確保 modelUrl 在此範圍內可用
+            // 修正點：此處現在可以正確存取 modelUrl
             model = await tf.loadLayersModel(modelUrl);
         }
         
@@ -187,7 +188,7 @@ function findDigitBoxes(imageData) {
     return boxes.sort((a, b) => a.x - b.x);
 }
 
-// --- 3. UI 與其餘邏輯 (維持原樣) ---
+// --- 3. UI 與其他邏輯 (維持不變) ---
 
 function addGalaxyEffects() {
     setTimeout(() => {
