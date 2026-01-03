@@ -21,7 +21,7 @@ let realtimeInterval = null;
 let lastX = 0;
 let lastY = 0;
 
-// --- 1. 系統初始化與模型載入 (針對 WebGL 與 producer 報錯修正) ---
+// --- 1. 系統初始化與模型載入 (解決 WebGL 不支援與 producer 格式報錯) ---
 async function init() {
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -32,38 +32,35 @@ async function init() {
     try {
         confDetails.innerText = "🌌 正在啟動銀河 AI 引擎...";
 
-        // 解決 WebGL 不支援問題：強制檢查並切換後端
+        // 強制切換至 CPU 模式以解決 WebGL 不支援問題
         try {
-            await tf.setBackend('webgl');
-            await tf.ready();
-        } catch (e) {
-            console.warn("WebGL 啟動失敗，切換至 CPU 模式運算");
             await tf.setBackend('cpu');
             await tf.ready();
+            console.log("當前運行後端:", tf.getBackend());
+        } catch (e) {
+            console.error("後端初始化失敗:", e);
         }
 
-        console.log("當前運行後端:", tf.getBackend());
-
-        // 解決模型載入報錯：嚴格路徑與格式載入
+        // 針對 'producer' 報錯的修正：
+        // 你的模型應為 LayersModel 格式。我們只使用 loadLayersModel，並加入快取清理邏輯。
         try {
-            // 第一優先：LayersModel (標準 Keras 格式)
-            model = await tf.loadLayersModel('tfjs_model/model.json');
+            // 加入 timestamp 防止瀏覽器抓到舊的、錯誤的 model.json 快取
+            const modelPath = `tfjs_model/model.json?t=${Date.now()}`;
+            model = await tf.loadLayersModel(modelPath);
             console.log("✅ 成功以 LayersModel 載入模型");
+            confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
         } catch (err) {
-            console.warn("LayersModel 載入嘗試失敗，嘗試備用模式...");
-            // 第二優先：GraphModel (如果模型曾被優化過)
-            model = await tf.loadGraphModel('tfjs_model/model.json');
-            console.log("✅ 成功以 GraphModel 載入模型");
+            console.error("載入失敗詳細資訊:", err);
+            confDetails.innerText = "❌ 模型載入失敗：請確認 tfjs_model 資料夾內是否有 bin 權重檔";
         }
         
-        confDetails.innerText = "🚀 系統就緒，請開始在星域書寫";
     } catch (finalErr) {
-        confDetails.innerText = "❌ 模型載入失敗：請確認 tfjs_model 資料夾內是否有 .bin 權重檔";
-        console.error("模型載入終極錯誤報告:", finalErr);
+        confDetails.innerText = "❌ 系統初始化異常";
+        console.error("終極錯誤報告:", finalErr);
     }
 }
 
-// --- 2. 影像處理邏輯 (保留您原有的辨識部分，完全不動) ---
+// --- 2. 影像處理邏輯 (辨識邏輯完全保留) ---
 
 function advancedPreprocess(roiCanvas) {
     return tf.tidy(() => {
@@ -350,7 +347,7 @@ function addDrawingEffect(x, y) {
     setTimeout(() => effect.remove(), 500);
 }
 
-// --- 5. 語音與 UI 詳情 (保留) ---
+// --- 5. 語音、檔案與細節 (保留) ---
 
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
