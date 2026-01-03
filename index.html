@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>銀河系手寫辨識系統 - TFJS 版</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        /* 簡單補強一些核心樣式，確保畫布顯示正確 */
+        #mainBox { position: relative; background: #000; padding: 20px; border-radius: 15px; }
+        canvas { border: 2px solid #a3d9ff; cursor: crosshair; touch-action: none; background-color: black; }
+        #camera-feed { display: none; position: absolute; top: 20px; left: 20px; opacity: 0.5; pointer-events: none; }
+        .result-area { color: #fff; text-align: center; margin-top: 20px; }
+        #digit-display { font-size: 48px; color: #a3d9ff; text-shadow: 0 0 10px #a3d9ff; }
+    </style>
+</head>
+<body>
+
+    <div id="mainBox">
+        <h1 style="color: #a3d9ff; text-align: center;">銀河系手寫辨識系統</h1>
+        
+        <div style="position: relative; width: 800px; margin: 0 auto;">
+            <video id="camera-feed" width="800" height="400" autoplay playsinline></video>
+            <canvas id="canvas" width="800" height="400"></canvas>
+        </div>
+
+        <div style="text-align: center; margin-top: 20px;">
+            <button id="camToggleBtn" onclick="toggleCamera()">📷 開啟鏡頭</button>
+            <button id="eraserBtn" onclick="toggleEraser()">橡皮擦：關閉</button>
+            <button id="clearBtn" onclick="clearCanvas()">✨ 清空星域</button>
+            <button id="uploadBtn" onclick="triggerFile()">📁 上傳檔案</button>
+            <button id="voiceBtn" onclick="toggleVoice()">🎙️ 語音控制</button>
+            <input type="file" id="fileInput" style="display: none;" onchange="handleFile(event)">
+        </div>
+
+        <div class="result-area">
+            <div>辨識結果：<span id="digit-display">---</span></div>
+            <div id="conf-details" style="font-size: 14px; color: #888; margin-top: 10px;">正在初始化星系通訊...</div>
+            <div id="voice-status" style="color: #ff6b9d;"></div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
