@@ -1,6 +1,6 @@
 /**
  * 🌌 銀河手寫數字辨識系統 - 修復版
- * 修復了關閉鏡頭和語音輸入按鈕問題
+ * 修復了語音辨識和鏡頭無法關閉的問題
  */
 
 // ==================== 全局變量初始化 ====================
@@ -821,17 +821,16 @@ function addVisualFeedback(color) {
     });
 }
 
-// ==================== 相機功能 - 修復關閉問題 ====================
+// ==================== 相機功能 - 修復無法關閉問題 ====================
 async function toggleCamera() {
-    console.log('toggleCamera 被呼叫，當前 cameraStream:', cameraStream);
+    const camToggleBtn = document.getElementById('camToggleBtn');
     
+    // 如果已經有相機串流，則關閉它
     if (cameraStream) {
-        // 關閉相機
         console.log('正在關閉相機...');
         
-        // 停止所有軌道
+        // 停止所有媒體軌道
         cameraStream.getTracks().forEach(track => {
-            console.log('停止軌道:', track.kind);
             track.stop();
         });
         
@@ -841,32 +840,35 @@ async function toggleCamera() {
             realtimeInterval = null;
         }
         
-        // 清除影片來源
+        // 清除影片串流
         video.srcObject = null;
+        cameraStream = null;
+        
+        // 隱藏影片元素
         video.style.display = "none";
         
         // 移除相機活動類
         document.getElementById('mainBox').classList.remove('cam-active');
         
-        // 更新按鈕文字
-        const camToggleBtn = document.getElementById('camToggleBtn');
+        // 更新按鈕文字和狀態
         if (camToggleBtn) {
             camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
             camToggleBtn.classList.remove('cam-active');
         }
         
-        // 清除畫布並重置
-        cameraStream = null;
+        // 重新初始化畫布
         clearCanvas();
         
-        console.log('相機已關閉');
+        console.log('相機已成功關閉');
+        addVisualFeedback("#34495e");
         return;
     }
     
-    // 開啟相機
+    // 如果沒有相機串流，則開啟它
     try {
         console.log('正在開啟相機...');
         
+        // 請求相機權限
         cameraStream = await navigator.mediaDevices.getUserMedia({
             video: { 
                 facingMode: "environment",
@@ -876,11 +878,12 @@ async function toggleCamera() {
             audio: false
         });
         
+        // 設置影片來源
         video.srcObject = cameraStream;
         video.style.display = "block";
         document.getElementById('mainBox').classList.add('cam-active');
         
-        const camToggleBtn = document.getElementById('camToggleBtn');
+        // 更新按鈕文字和狀態
         if (camToggleBtn) {
             camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 關閉鏡頭';
             camToggleBtn.classList.add('cam-active');
@@ -891,10 +894,11 @@ async function toggleCamera() {
             await predict(true);
         }, 800);
         
+        // 清除畫布
         clearCanvas();
         addVisualFeedback("#9b59b6");
         
-        console.log('相機已開啟');
+        console.log('相機已成功開啟');
         
     } catch (err) {
         console.error('鏡頭啟動失敗:', err);
@@ -902,7 +906,6 @@ async function toggleCamera() {
         
         // 重置狀態
         cameraStream = null;
-        const camToggleBtn = document.getElementById('camToggleBtn');
         if (camToggleBtn) {
             camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
             camToggleBtn.classList.remove('cam-active');
@@ -969,7 +972,7 @@ function updateDetails(data) {
     confDetails.innerHTML = html;
 }
 
-// ==================== 語音功能 - 修復按鈕沒反應問題 ====================
+// ==================== 語音功能 - 修復無法關閉問題 ====================
 
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1001,19 +1004,28 @@ function initSpeechRecognition() {
         };
         
         recognition.onend = () => {
-            console.log('語音識別結束');
-            // 如果用戶沒有主動關閉，自動重啟
+            console.log('語音識別結束，當前 isVoiceActive:', isVoiceActive);
+            
+            // 只有在用戶沒有主動關閉時才重啟
             if (isVoiceActive) {
+                console.log('自動重啟語音識別');
                 setTimeout(() => {
                     try {
-                        if (isVoiceActive) {
+                        if (isVoiceActive && recognition) {
                             recognition.start();
                         }
                     } catch (e) {
                         console.log('語音識別重啟失敗:', e);
+                        if (e.name === 'InvalidStateError') {
+                            // 忽略已經啟動的錯誤
+                        } else {
+                            isVoiceActive = false;
+                            updateVoiceButton();
+                        }
                     }
                 }, 100);
             } else {
+                console.log('用戶已關閉語音識別，不重啟');
                 if (voiceStatus) voiceStatus.style.display = 'none';
             }
         };
@@ -1059,6 +1071,10 @@ function initSpeechRecognition() {
                     // 無語音輸入，繼續監聽
                     break;
                     
+                case 'aborted':
+                    // 用戶手動停止，不處理
+                    break;
+                    
                 default:
                     console.log('其他語音錯誤:', event.error);
             }
@@ -1095,53 +1111,53 @@ function toggleVoice() {
     }
     
     if (isVoiceActive) {
-        // 關閉語音
+        // 關閉語音識別
         console.log('正在關閉語音識別...');
         isVoiceActive = false;
+        updateVoiceButton();
+        
         try {
             recognition.stop();
         } catch (e) {
             console.log('停止語音識別時出錯:', e);
         }
-        updateVoiceButton();
+        
         if (voiceStatus) {
             voiceStatus.style.display = 'none';
         }
+        
         addVisualFeedback("#34495e");
-        console.log('語音識別已關閉');
+        console.log('語音識別已成功關閉');
     } else {
-        // 開啟語音
+        // 開啟語音識別
         console.log('正在開啟語音識別...');
-        try {
-            // 檢查麥克風權限
-            navigator.permissions.query({ name: 'microphone' }).then(permissionStatus => {
-                console.log('麥克風權限狀態:', permissionStatus.state);
+        
+        // 先請求麥克風權限
+        navigator.mediaDevices.getUserMedia({ audio: true })
+            .then(stream => {
+                // 關閉測試流
+                stream.getTracks().forEach(track => track.stop());
                 
-                if (permissionStatus.state === 'denied') {
-                    alert("請允許瀏覽器使用麥克風權限");
-                    return;
+                // 啟動語音識別
+                isVoiceActive = true;
+                updateVoiceButton();
+                
+                try {
+                    recognition.start();
+                } catch (e) {
+                    console.log('啟動語音識別時出錯:', e);
+                    isVoiceActive = false;
+                    updateVoiceButton();
+                    alert("無法啟動語音識別");
                 }
                 
-                isVoiceActive = true;
-                recognition.start();
-                updateVoiceButton();
                 addVisualFeedback("#ff6b9d");
-                console.log('語音識別已開啟');
-            }).catch(err => {
-                console.log('權限查詢失敗:', err);
-                // 如果權限查詢失敗，直接嘗試啟動
-                isVoiceActive = true;
-                recognition.start();
-                updateVoiceButton();
-                addVisualFeedback("#ff6b9d");
+                console.log('語音識別已成功開啟');
+            })
+            .catch(err => {
+                console.log('麥克風權限錯誤:', err);
+                alert("請允許使用麥克風以啟用語音輸入功能");
             });
-            
-        } catch (e) {
-            console.log("語音識別啟動錯誤:", e);
-            isVoiceActive = false;
-            updateVoiceButton();
-            alert("無法啟動語音識別，請檢查麥克風權限");
-        }
     }
 }
 
