@@ -58,7 +58,7 @@ class PatchModelLoader {
             if (artifacts.modelTopology) {
                 traverseAndPatch(artifacts.modelTopology);
             }
-            
+
             // 修復權重名稱
             if (artifacts.weightSpecs) {
                 artifacts.weightSpecs.forEach(spec => {
@@ -115,9 +115,9 @@ async function loadModel() {
         let backendToUse = 'cpu';
         try {
             // 檢查 WebGL 支持
-            const canvasTest = document.createElement('canvas');
-            const gl = canvasTest.getContext('webgl2') || canvasTest.getContext('webgl') || 
-                       canvasTest.getContext('experimental-webgl');
+            const canvas = document.createElement('canvas');
+            const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || 
+                       canvas.getContext('experimental-webgl');
             if (gl) {
                 backendToUse = 'webgl';
             }
@@ -185,11 +185,11 @@ function imageDataToGrayArray(imageData) {
     const height = imageData.height;
     const data = imageData.data;
     const grayArray = new Uint8Array(width * height);
-
+    
     for (let i = 0, j = 0; i < data.length; i += 4, j++) {
         grayArray[j] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
     }
-
+    
     return { data: grayArray, width, height };
 }
 
@@ -215,15 +215,15 @@ function invertBackground(grayArray) {
 function simpleGaussianBlur(grayArray) {
     const { data, width, height } = grayArray;
     const result = new Uint8Array(width * height);
-
+    
     const kernel = [1, 2, 1, 2, 4, 2, 1, 2, 1];
     const kernelSum = 16;
-
+    
     for (let y = 1; y < height - 1; y++) {
         for (let x = 1; x < width - 1; x++) {
             let sum = 0;
             let k = 0;
-
+            
             for (let ky = -1; ky <= 1; ky++) {
                 for (let kx = -1; kx <= 1; kx++) {
                     const idx = (y + ky) * width + (x + kx);
@@ -231,12 +231,12 @@ function simpleGaussianBlur(grayArray) {
                     k++;
                 }
             }
-
+            
             const idx = y * width + x;
             result[idx] = Math.round(sum / kernelSum);
         }
     }
-
+    
     // 複製邊緣像素
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
@@ -246,54 +246,54 @@ function simpleGaussianBlur(grayArray) {
             }
         }
     }
-
+    
     return { data: result, width, height };
 }
 
 // Otsu 閾值計算 (完全移植自 OpenCV 算法)
 function calculateOtsuThreshold(grayArray) {
     const { data } = grayArray;
-
+    
     // 計算直方圖
     const histogram = new Array(256).fill(0);
     for (let i = 0; i < data.length; i++) {
         histogram[data[i]]++;
     }
-
+    
     // 計算總像素數和總和
     const total = data.length;
     let sum = 0;
     for (let i = 0; i < 256; i++) {
         sum += i * histogram[i];
     }
-
+    
     let sumB = 0;
     let wB = 0;
     let wF = 0;
     let maxVariance = 0;
     let threshold = 0;
-
+    
     for (let i = 0; i < 256; i++) {
         wB += histogram[i];
         if (wB === 0) continue;
-
+        
         wF = total - wB;
         if (wF === 0) break;
-
+        
         sumB += i * histogram[i];
-
+        
         const mB = sumB / wB;
         const mF = (sum - sumB) / wF;
-
+        
         // 計算類間方差
         const variance = wB * wF * Math.pow(mB - mF, 2);
-
+        
         if (variance > maxVariance) {
             maxVariance = variance;
             threshold = i;
         }
     }
-
+    
     return threshold;
 }
 
@@ -301,11 +301,11 @@ function calculateOtsuThreshold(grayArray) {
 function binarizeImage(grayArray, threshold) {
     const { data, width, height } = grayArray;
     const binary = new Uint8Array(width * height);
-
+    
     for (let i = 0; i < data.length; i++) {
         binary[i] = data[i] > threshold ? 255 : 0;
     }
-
+    
     return { data: binary, width, height };
 }
 
@@ -314,47 +314,47 @@ function findConnectedComponents(binaryImage) {
     const { data, width, height } = binaryImage;
     const visited = new Array(width * height).fill(false);
     const components = [];
-
+    
     // 8方向鄰居
     const directions = [
         [-1, -1], [0, -1], [1, -1],
-        [-1,  0],          [1,  0],
-        [-1,  1], [0,  1], [1,  1]
+        [-1, 0],           [1, 0],
+        [-1, 1],  [0, 1],  [1, 1]
     ];
-
+    
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = y * width + x;
-
+            
             if (!visited[idx] && data[idx] === 255) {
                 // BFS 搜尋連通域
                 const queue = [[x, y]];
                 visited[idx] = true;
-
+                
                 let minX = x, maxX = x, minY = y, maxY = y;
                 let area = 0;
                 const pixels = [];
-
+                
                 while (queue.length > 0) {
                     const [cx, cy] = queue.shift();
                     const cIdx = cy * width + cx;
-
+                    
                     area++;
                     pixels.push([cx, cy]);
-
+                    
                     minX = Math.min(minX, cx);
                     maxX = Math.max(maxX, cx);
                     minY = Math.min(minY, cy);
                     maxY = Math.max(maxY, cy);
-
+                    
                     // 檢查8鄰居
                     for (const [dx, dy] of directions) {
                         const nx = cx + dx;
                         const ny = cy + dy;
-
+                        
                         if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
                             const nIdx = ny * width + nx;
-
+                            
                             if (!visited[nIdx] && data[nIdx] === 255) {
                                 visited[nIdx] = true;
                                 queue.push([nx, ny]);
@@ -362,12 +362,12 @@ function findConnectedComponents(binaryImage) {
                         }
                     }
                 }
-
+                
                 const w = maxX - minX + 1;
                 const h = maxY - minY + 1;
                 const aspectRatio = w / h;
                 const solidity = area / (w * h);
-
+                
                 components.push({
                     x: minX,
                     y: minY,
@@ -381,7 +381,7 @@ function findConnectedComponents(binaryImage) {
             }
         }
     }
-
+    
     return components;
 }
 
@@ -389,40 +389,40 @@ function findConnectedComponents(binaryImage) {
 function dilateBinary(binaryImage, kernelSize = 2) {
     const { data, width, height } = binaryImage;
     const result = new Uint8Array(width * height);
-
+    
     const half = Math.floor(kernelSize / 2);
-
+    
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = y * width + x;
             let maxVal = 0;
-
+            
             // 檢查核範圍
             for (let ky = -half; ky <= half; ky++) {
                 for (let kx = -half; kx <= half; kx++) {
                     const nx = x + kx;
                     const ny = y + ky;
-
+                    
                     if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
                         const nIdx = ny * width + nx;
                         maxVal = Math.max(maxVal, data[nIdx]);
                     }
                 }
             }
-
+            
             result[idx] = maxVal;
         }
     }
-
+    
     return { data: result, width, height };
 }
 
 // 計算圖像矩 (用於質心計算)
 function calculateImageMoments(binaryImage) {
     const { data, width, height } = binaryImage;
-
+    
     let m00 = 0, m10 = 0, m01 = 0;
-
+    
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = y * width + x;
@@ -434,58 +434,58 @@ function calculateImageMoments(binaryImage) {
             }
         }
     }
-
+    
     return { m00, m10, m01 };
 }
 
 // 進階預處理 (完全移植自 p.py 的 advanced_preprocess)
 function advancedPreprocess(roiImage) {
     const { data, width, height } = roiImage;
-
+    
     // 1. 建立二值化陣列
     const binaryArray = new Uint8Array(width * height);
     for (let i = 0; i < data.length; i++) {
         binaryArray[i] = data[i] > 128 ? 255 : 0;
     }
-
+    
     // 2. 膨脹：使用 2x2 核
     const kernelSize = 2;
     const halfKernel = Math.floor(kernelSize / 2);
     const dilated = new Uint8Array(width * height);
-
+    
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = y * width + x;
             let maxVal = 0;
-
+            
             for (let ky = -halfKernel; ky <= halfKernel; ky++) {
                 for (let kx = -halfKernel; kx <= halfKernel; kx++) {
                     const nx = x + kx;
                     const ny = y + ky;
-
+                    
                     if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
                         const nIdx = ny * width + nx;
                         maxVal = Math.max(maxVal, binaryArray[nIdx]);
                     }
                 }
             }
-
+            
             dilated[idx] = maxVal;
         }
     }
-
+    
     // 3. 動態 Padding
     const pad = Math.floor(Math.max(height, width) * 0.45);
     const paddedWidth = width + 2 * pad;
     const paddedHeight = height + 2 * pad;
-
+    
     const paddedData = new Uint8Array(paddedWidth * paddedHeight);
-
+    
     // 填充黑色背景
     for (let i = 0; i < paddedData.length; i++) {
         paddedData[i] = 0;
     }
-
+    
     // 複製膨脹後的影像到中央
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
@@ -494,14 +494,14 @@ function advancedPreprocess(roiImage) {
             paddedData[dstIdx] = dilated[srcIdx];
         }
     }
-
+    
     // 4. 縮放至 28x28 (使用最近鄰插值)
     const targetSize = 28;
     const scaledData = new Uint8Array(targetSize * targetSize);
-
+    
     const xRatio = paddedWidth / targetSize;
     const yRatio = paddedHeight / targetSize;
-
+    
     for (let y = 0; y < targetSize; y++) {
         for (let x = 0; x < targetSize; x++) {
             const srcX = Math.floor(x * xRatio);
@@ -511,26 +511,26 @@ function advancedPreprocess(roiImage) {
             scaledData[dstIdx] = paddedData[srcIdx];
         }
     }
-
+    
     // 5. 質心校正
     const moments = calculateImageMoments({ data: scaledData, width: targetSize, height: targetSize });
-
+    
     if (moments.m00 !== 0) {
         const cx = moments.m10 / moments.m00;
         const cy = moments.m01 / moments.m00;
-
+        
         // 計算平移矩陣
         const dx = 14 - cx;
         const dy = 14 - cy;
-
+        
         const correctedData = new Uint8Array(targetSize * targetSize);
-
+        
         // 應用仿射變換
         for (let y = 0; y < targetSize; y++) {
             for (let x = 0; x < targetSize; x++) {
                 const srcX = Math.round(x - dx);
                 const srcY = Math.round(y - dy);
-
+                
                 if (srcX >= 0 && srcX < targetSize && srcY >= 0 && srcY < targetSize) {
                     const srcIdx = srcY * targetSize + srcX;
                     correctedData[y * targetSize + x] = scaledData[srcIdx];
@@ -539,13 +539,13 @@ function advancedPreprocess(roiImage) {
                 }
             }
         }
-
+        
         // 6. 歸一化到 0-1 範圍
         const normalizedData = new Float32Array(targetSize * targetSize);
         for (let i = 0; i < correctedData.length; i++) {
             normalizedData[i] = correctedData[i] / 255.0;
         }
-
+        
         return normalizedData;
     } else {
         // 如果 m00 為 0，直接返回縮放後的數據
@@ -925,12 +925,6 @@ async function toggleCamera() {
         });
         
         video.srcObject = cameraStream;
-        // 嘗試自動播放視頻流
-        try {
-            await video.play();
-        } catch (err) {
-            console.warn("Video play failed:", err);
-        }
         video.style.display = "block";
         document.getElementById('mainBox').classList.add('cam-active');
         
@@ -987,8 +981,7 @@ function triggerFile() {
 }
 
 function handleFile(event) {
-    const fileInput = event.target;
-    const file = fileInput.files[0];
+    const file = event.target.files[0];
     if (!file) return;
     
     // 如果相機開啟，先關閉
@@ -1017,8 +1010,6 @@ function handleFile(event) {
             addVisualFeedback("#3498db");
         };
         img.src = e.target.result;
-        // 重置文件輸入，以允許再次選擇相同文件
-        fileInput.value = '';
     };
     reader.readAsDataURL(file);
 }
@@ -1038,6 +1029,7 @@ function updateDetails(data) {
 }
 
 // ==================== 語音功能 (修復重複啟動錯誤) ====================
+
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -1232,6 +1224,7 @@ function toggleVoice() {
 }
 
 // ==================== 繪圖事件處理 ====================
+
 function getCanvasCoordinates(e) {
     const rect = canvas.getBoundingClientRect();
     let x, y;
@@ -1266,10 +1259,11 @@ function draw(e) {
     
     const { x, y } = getCanvasCoordinates(e);
     
-    ctx.beginPath();
-    ctx.moveTo(lastX, lastY);
     ctx.lineTo(x, y);
     ctx.stroke();
+    
+    ctx.beginPath();
+    ctx.moveTo(x, y);
     
     lastX = x;
     lastY = y;
@@ -1298,6 +1292,7 @@ function handleTouchMove(e) {
 }
 
 // ==================== 事件監聽器綁定 ====================
+
 function setupEventListeners() {
     // 畫布事件
     canvas.addEventListener('mousedown', startDrawing);
