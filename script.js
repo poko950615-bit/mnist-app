@@ -22,6 +22,8 @@ let isProcessing = false;
 let lastX = 0;
 let lastY = 0;
 let drawingStartPoint = null; // 追蹤繪圖起始點
+let isCameraActive = false; // 追蹤相機狀態
+let voiceRecognitionActive = false; // 追蹤語音識別狀態
 
 // ==================== Keras v3 兼容性修復 ====================
 class PatchModelLoader {
@@ -825,33 +827,48 @@ function addVisualFeedback(color) {
 
 // ==================== 相機功能 - 修復開關bug ====================
 async function toggleCamera() {
-    if (cameraStream) {
+    const camToggleBtn = document.getElementById('camToggleBtn');
+    
+    // 如果正在處理中，直接返回
+    if (isProcessing && !isCameraActive) return;
+    
+    if (isCameraActive) {
         // 關閉相機
-        cameraStream.getTracks().forEach(track => track.stop());
-        cameraStream = null;
-        
-        if (realtimeInterval) {
-            clearInterval(realtimeInterval);
-            realtimeInterval = null;
+        try {
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(track => track.stop());
+                cameraStream = null;
+            }
+            
+            if (realtimeInterval) {
+                clearInterval(realtimeInterval);
+                realtimeInterval = null;
+            }
+            
+            video.srcObject = null;
+            video.style.display = "none";
+            document.getElementById('mainBox').classList.remove('cam-active');
+            
+            if (camToggleBtn) {
+                camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
+                camToggleBtn.classList.remove('cam-active');
+            }
+            
+            isCameraActive = false;
+            
+            // 重新初始化畫布
+            clearCanvas();
+            addVisualFeedback("#34495e");
+            console.log('相機已關閉');
+        } catch (err) {
+            console.error('關閉相機時出錯:', err);
         }
-        
-        video.srcObject = null;
-        video.style.display = "none";
-        document.getElementById('mainBox').classList.remove('cam-active');
-        
-        const camToggleBtn = document.getElementById('camToggleBtn');
-        if (camToggleBtn) {
-            camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
-            camToggleBtn.classList.remove('cam-active');
-        }
-        
-        // 重新初始化畫布
-        clearCanvas();
-        addVisualFeedback("#34495e");
         return;
     }
     
+    // 開啟相機
     try {
+        isProcessing = true;
         cameraStream = await navigator.mediaDevices.getUserMedia({
             video: { 
                 facingMode: "environment",
@@ -865,11 +882,12 @@ async function toggleCamera() {
         video.style.display = "block";
         document.getElementById('mainBox').classList.add('cam-active');
         
-        const camToggleBtn = document.getElementById('camToggleBtn');
         if (camToggleBtn) {
             camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 關閉鏡頭';
             camToggleBtn.classList.add('cam-active');
         }
+        
+        isCameraActive = true;
         
         // 開始即時辨識
         realtimeInterval = setInterval(async () => {
@@ -878,14 +896,16 @@ async function toggleCamera() {
         
         clearCanvas();
         addVisualFeedback("#9b59b6");
+        isProcessing = false;
         
     } catch (err) {
         console.error('鏡頭啟動失敗:', err);
         alert("無法啟動鏡頭：請確保已授予相機權限");
         
         // 重置狀態
-        cameraStream = null;
-        const camToggleBtn = document.getElementById('camToggleBtn');
+        isCameraActive = false;
+        isProcessing = false;
+        
         if (camToggleBtn) {
             camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
             camToggleBtn.classList.remove('cam-active');
@@ -894,22 +914,16 @@ async function toggleCamera() {
 }
 
 // ==================== 檔案上傳 - 修復上傳二次問題 ====================
-let lastFileUploadTime = 0;
-const UPLOAD_COOLDOWN = 500; // 500毫秒冷卻時間
-
 function triggerFile() {
     const fileInput = document.getElementById('fileInput');
     if (fileInput) {
-        // 檢查冷卻時間
-        const now = Date.now();
-        if (now - lastFileUploadTime < UPLOAD_COOLDOWN) {
-            return;
-        }
-        lastFileUploadTime = now;
+        // 創建一個新的文件輸入元素來重置狀態
+        const newFileInput = fileInput.cloneNode(true);
+        fileInput.parentNode.replaceChild(newFileInput, fileInput);
         
-        // 重置檔案輸入
-        fileInput.value = '';
-        fileInput.click();
+        // 重新綁定事件
+        newFileInput.addEventListener('change', handleFile);
+        newFileInput.click();
     }
     addVisualFeedback("#3498db");
 }
@@ -919,22 +933,8 @@ function handleFile(event) {
     if (!file) return;
     
     // 如果相機開啟，先關閉
-    if (cameraStream) {
-        cameraStream.getTracks().forEach(track => track.stop());
-        cameraStream = null;
-        video.style.display = "none";
-        document.getElementById('mainBox').classList.remove('cam-active');
-        
-        const camToggleBtn = document.getElementById('camToggleBtn');
-        if (camToggleBtn) {
-            camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
-            camToggleBtn.classList.remove('cam-active');
-        }
-        
-        if (realtimeInterval) {
-            clearInterval(realtimeInterval);
-            realtimeInterval = null;
-        }
+    if (isCameraActive) {
+        toggleCamera();
     }
     
     const reader = new FileReader();
@@ -956,11 +956,14 @@ function handleFile(event) {
             ctx.drawImage(img, x, y, w, h);
             predict(false);
             addVisualFeedback("#3498db");
-            
-            // 立即重置檔案輸入，以便下次上傳
-            event.target.value = '';
+        };
+        img.onerror = () => {
+            alert('圖片載入失敗，請嘗試其他圖片');
         };
         img.src = e.target.result;
+    };
+    reader.onerror = () => {
+        alert('檔案讀取失敗，請重新選擇');
     };
     reader.readAsDataURL(file);
 }
@@ -996,12 +999,8 @@ function initSpeechRecognition() {
         recognition.continuous = true;
         recognition.interimResults = false;
         
-        let retryCount = 0;
-        const MAX_RETRIES = 3;
-        
         recognition.onstart = () => {
             console.log('語音識別已啟動');
-            retryCount = 0;
             if (voiceStatus) {
                 voiceStatus.style.display = 'block';
                 voiceStatus.innerHTML = '<span class="pulse-icon">🎙️</span> 語音辨識已啟動';
@@ -1012,10 +1011,8 @@ function initSpeechRecognition() {
         recognition.onend = () => {
             console.log('語音識別結束');
             
-            if (isVoiceActive && retryCount < MAX_RETRIES) {
-                retryCount++;
-                console.log(`嘗試重啟語音識別 (${retryCount}/${MAX_RETRIES})`);
-                
+            // 只有在用戶沒有主動關閉時才重啟
+            if (isVoiceActive) {
                 setTimeout(() => {
                     try {
                         if (isVoiceActive) {
@@ -1023,16 +1020,9 @@ function initSpeechRecognition() {
                         }
                     } catch (e) {
                         console.log('語音識別重啟失敗:', e);
-                        if (retryCount >= MAX_RETRIES) {
-                            console.log('達到最大重試次數，停止語音識別');
-                            isVoiceActive = false;
-                            updateVoiceButton();
-                            if (voiceStatus) voiceStatus.style.display = 'none';
-                        }
                     }
                 }, 1000);
             } else {
-                updateVoiceButton();
                 if (voiceStatus) voiceStatus.style.display = 'none';
             }
         };
@@ -1040,8 +1030,6 @@ function initSpeechRecognition() {
         recognition.onresult = (event) => {
             const transcript = event.results[event.results.length - 1][0].transcript.trim();
             console.log("語音識別結果:", transcript);
-            
-            retryCount = 0;
             
             if (transcript.includes('清除') || transcript.includes('清空')) {
                 clearCanvas();
@@ -1137,7 +1125,19 @@ function toggleVoice() {
             console.log("語音識別啟動錯誤:", e);
             isVoiceActive = false;
             updateVoiceButton();
-            alert("無法啟動語音識別，請檢查麥克風權限");
+            
+            // 嘗試獲取麥克風權限
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    stream.getTracks().forEach(track => track.stop());
+                    isVoiceActive = true;
+                    recognition.start();
+                    updateVoiceButton();
+                })
+                .catch(err => {
+                    console.log("麥克風權限錯誤:", err);
+                    alert("請允許使用麥克風以啟用語音輸入功能");
+                });
         }
     }
 }
@@ -1156,6 +1156,10 @@ function getCanvasCoordinates(e) {
         y = e.clientY - rect.top;
     }
     
+    // 確保坐標在畫布範圍內
+    x = Math.max(0, Math.min(x, canvas.width - 1));
+    y = Math.max(0, Math.min(y, canvas.height - 1));
+    
     return { x, y };
 }
 
@@ -1165,7 +1169,6 @@ function startDrawing(e) {
     // 如果是相機模式，不允許繪圖
     if (cameraStream) return;
     
-    isDrawing = true;
     const { x, y } = getCanvasCoordinates(e);
     
     // 記錄起始點
@@ -1173,9 +1176,11 @@ function startDrawing(e) {
     lastX = x;
     lastY = y;
     
-    // 開始新路徑並移動到起始點
+    // 開始新路徑
     ctx.beginPath();
     ctx.moveTo(x, y);
+    
+    isDrawing = true;
 }
 
 function draw(e) {
@@ -1185,17 +1190,35 @@ function draw(e) {
     
     const { x, y } = getCanvasCoordinates(e);
     
-    // 確保我們從最後的點畫到新的點
-    ctx.lineTo(x, y);
+    // 計算與上一個點的距離
+    const distance = Math.sqrt(Math.pow(x - lastX, 2) + Math.pow(y - lastY, 2));
+    
+    // 如果距離太近，不繪製（避免密集點）
+    if (distance < 0.5) return;
+    
+    // 使用二次貝塞爾曲線使線條更平滑
+    const midX = (lastX + x) / 2;
+    const midY = (lastY + y) / 2;
+    
+    ctx.quadraticCurveTo(lastX, lastY, midX, midY);
     ctx.stroke();
     
     // 更新最後位置
     lastX = x;
     lastY = y;
+    
+    // 準備下一段
+    ctx.beginPath();
+    ctx.moveTo(lastX, lastY);
 }
 
 function stopDrawing() {
     if (isDrawing) {
+        // 完成最後一段線條
+        if (ctx) {
+            ctx.stroke();
+        }
+        
         isDrawing = false;
         
         // 如果不是相機模式，進行辨識
@@ -1226,21 +1249,12 @@ function setupEventListeners() {
     canvas.addEventListener('touchend', stopDrawing);
     
     // 按鈕事件
-    const buttons = {
-        '.btn-run': () => predict(false),
-        '.btn-clear': clearCanvas,
-        '#eraserBtn': toggleEraser,
-        '#camToggleBtn': toggleCamera,
-        '#voiceBtn': toggleVoice,
-        '.btn-upload': triggerFile
-    };
-    
-    Object.entries(buttons).forEach(([selector, handler]) => {
-        const element = document.querySelector(selector);
-        if (element) {
-            element.addEventListener('click', handler);
-        }
-    });
+    document.querySelector('.btn-run')?.addEventListener('click', () => predict(false));
+    document.querySelector('.btn-clear')?.addEventListener('click', clearCanvas);
+    document.querySelector('#eraserBtn')?.addEventListener('click', toggleEraser);
+    document.querySelector('#camToggleBtn')?.addEventListener('click', toggleCamera);
+    document.querySelector('#voiceBtn')?.addEventListener('click', toggleVoice);
+    document.querySelector('.btn-upload')?.addEventListener('click', triggerFile);
     
     // 檔案上傳事件
     const fileInput = document.getElementById('fileInput');
