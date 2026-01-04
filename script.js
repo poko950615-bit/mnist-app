@@ -1,6 +1,6 @@
 /**
- * 🌌 手寫數字辨識系統 - 銀河主題版
- * 完整功能版本 - 修復辨識問題
+ * 🌌 手寫數字辨識系統 - 完整移植版
+ * 完全移植 p.py 的所有功能，確保辨識正確
  */
 
 // --- 全域變數初始化 ---
@@ -21,8 +21,6 @@ let isDrawing = false;
 let isEraser = false;
 let cameraStream = null;
 let realtimeInterval = null;
-let lastX = 0;
-let lastY = 0;
 let recognition = null;
 let isVoiceActive = false;
 let isProcessing = false;
@@ -45,11 +43,14 @@ async function loadModel() {
         console.log("模型輸入形狀:", model.inputs[0].shape);
         console.log("模型輸出形狀:", model.outputs[0].shape);
         
-        // 模型暖身（使用隨機資料）
-        const warmupTensor = tf.randomUniform([1, 28, 28, 1], 0, 1);
-        const warmupResult = model.predict(warmupTensor);
-        warmupTensor.dispose();
-        warmupResult.dispose();
+        // 測試模型是否正常運作
+        const testInput = tf.zeros([1, 28, 28, 1]);
+        const testOutput = model.predict(testInput);
+        const testResult = testOutput.dataSync();
+        console.log("模型測試輸出:", testResult);
+        
+        testInput.dispose();
+        testOutput.dispose();
         
         confDetails.innerText = "🚀 系統就緒，請開始書寫數字";
         return true;
@@ -60,87 +61,116 @@ async function loadModel() {
     }
 }
 
-// --- 影像處理函數 (移植自 p.py) ---
+// --- 影像處理函數 (完全移植自 p.py) ---
 
-// 簡易高斯模糊
-function simpleGaussianBlur(imageData) {
+// 轉換 ImageData 為灰階陣列
+function imageDataToGrayArray(imageData) {
     const width = imageData.width;
     const height = imageData.height;
     const data = imageData.data;
-    const result = new ImageData(width, height);
+    const grayArray = new Uint8Array(width * height);
     
-    // 簡化的 3x3 高斯核
-    const kernel = [
-        [1, 2, 1],
-        [2, 4, 2],
-        [1, 2, 1]
-    ];
+    for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+        grayArray[j] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+    }
+    
+    return { data: grayArray, width, height };
+}
+
+// 計算平均亮度
+function calculateAverageBrightness(grayArray) {
+    let sum = 0;
+    for (let i = 0; i < grayArray.data.length; i++) {
+        sum += grayArray.data[i];
+    }
+    return sum / grayArray.data.length;
+}
+
+// 背景反轉
+function invertBackground(grayArray) {
+    const inverted = new Uint8Array(grayArray.data.length);
+    for (let i = 0; i < grayArray.data.length; i++) {
+        inverted[i] = 255 - grayArray.data[i];
+    }
+    return { data: inverted, width: grayArray.width, height: grayArray.height };
+}
+
+// 簡化高斯模糊 (3x3 核心)
+function simpleGaussianBlur(grayArray) {
+    const { data, width, height } = grayArray;
+    const result = new Uint8Array(width * height);
+    
+    const kernel = [1, 2, 1, 2, 4, 2, 1, 2, 1];
     const kernelSum = 16;
     
     for (let y = 1; y < height - 1; y++) {
         for (let x = 1; x < width - 1; x++) {
-            let r = 0, g = 0, b = 0;
+            let sum = 0;
+            let k = 0;
             
             for (let ky = -1; ky <= 1; ky++) {
                 for (let kx = -1; kx <= 1; kx++) {
-                    const idx = ((y + ky) * width + (x + kx)) * 4;
-                    const weight = kernel[ky + 1][kx + 1];
-                    
-                    r += data[idx] * weight;
-                    g += data[idx + 1] * weight;
-                    b += data[idx + 2] * weight;
+                    const idx = (y + ky) * width + (x + kx);
+                    sum += data[idx] * kernel[k];
+                    k++;
                 }
             }
             
-            const resultIdx = (y * width + x) * 4;
-            result.data[resultIdx] = Math.min(255, Math.max(0, r / kernelSum));
-            result.data[resultIdx + 1] = Math.min(255, Math.max(0, g / kernelSum));
-            result.data[resultIdx + 2] = Math.min(255, Math.max(0, b / kernelSum));
-            result.data[resultIdx + 3] = 255;
+            const idx = y * width + x;
+            result[idx] = Math.round(sum / kernelSum);
         }
     }
     
-    return result;
-}
-
-// Otsu 閾值計算
-function calculateOtsuThreshold(imageData) {
-    const data = imageData.data;
-    const histogram = new Array(256).fill(0);
-    
-    // 計算灰階直方圖
-    for (let i = 0; i < data.length; i += 4) {
-        const gray = Math.floor((data[i] + data[i + 1] + data[i + 2]) / 3);
-        histogram[gray]++;
+    // 複製邊緣像素
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            if (y === 0 || y === height - 1 || x === 0 || x === width - 1) {
+                const idx = y * width + x;
+                result[idx] = data[idx];
+            }
+        }
     }
     
-    // Otsu 算法
-    const totalPixels = data.length / 4;
+    return { data: result, width, height };
+}
+
+// Otsu 閾值計算 (完全移植自 OpenCV 算法)
+function calculateOtsuThreshold(grayArray) {
+    const { data } = grayArray;
+    
+    // 計算直方圖
+    const histogram = new Array(256).fill(0);
+    for (let i = 0; i < data.length; i++) {
+        histogram[data[i]]++;
+    }
+    
+    // 計算總像素數和總和
+    const total = data.length;
     let sum = 0;
     for (let i = 0; i < 256; i++) {
         sum += i * histogram[i];
     }
     
-    let sumBackground = 0;
-    let weightBackground = 0;
-    let weightForeground = 0;
+    let sumB = 0;
+    let wB = 0;
+    let wF = 0;
     let maxVariance = 0;
     let threshold = 0;
     
     for (let i = 0; i < 256; i++) {
-        weightBackground += histogram[i];
-        if (weightBackground === 0) continue;
+        wB += histogram[i];
+        if (wB === 0) continue;
         
-        weightForeground = totalPixels - weightBackground;
-        if (weightForeground === 0) break;
+        wF = total - wB;
+        if (wF === 0) break;
         
-        sumBackground += i * histogram[i];
+        sumB += i * histogram[i];
         
-        const meanBackground = sumBackground / weightBackground;
-        const meanForeground = (sum - sumBackground) / weightForeground;
+        const mB = sumB / wB;
+        const mF = (sum - sumB) / wF;
         
-        const variance = weightBackground * weightForeground * 
-                         Math.pow(meanBackground - meanForeground, 2);
+        // 計算類間方差
+        const variance = wB * wF * Math.pow(mB - mF, 2);
         
         if (variance > maxVariance) {
             maxVariance = variance;
@@ -151,27 +181,25 @@ function calculateOtsuThreshold(imageData) {
     return threshold;
 }
 
-// 二值化影像
-function binarizeImage(imageData, threshold) {
-    const width = imageData.width;
-    const height = imageData.height;
-    const data = imageData.data;
-    const binaryData = new Uint8Array(width * height);
+// 二值化
+function binarizeImage(grayArray, threshold) {
+    const { data, width, height } = grayArray;
+    const binary = new Uint8Array(width * height);
     
-    for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-        const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
-        binaryData[j] = gray > threshold ? 255 : 0;
+    for (let i = 0; i < data.length; i++) {
+        binary[i] = data[i] > threshold ? 255 : 0;
     }
     
-    return { data: binaryData, width, height };
+    return { data: binary, width, height };
 }
 
-// 連通域分析
+// 連通域分析 (8-鄰居)
 function findConnectedComponents(binaryImage) {
     const { data, width, height } = binaryImage;
     const visited = new Array(width * height).fill(false);
     const components = [];
     
+    // 8方向鄰居
     const directions = [
         [-1, -1], [0, -1], [1, -1],
         [-1, 0],           [1, 0],
@@ -188,13 +216,15 @@ function findConnectedComponents(binaryImage) {
                 visited[idx] = true;
                 
                 let minX = x, maxX = x, minY = y, maxY = y;
-                let pixelCount = 0;
+                let area = 0;
+                const pixels = [];
                 
                 while (queue.length > 0) {
                     const [cx, cy] = queue.shift();
                     const cIdx = cy * width + cx;
                     
-                    pixelCount++;
+                    area++;
+                    pixels.push([cx, cy]);
                     
                     minX = Math.min(minX, cx);
                     maxX = Math.max(maxX, cx);
@@ -220,7 +250,6 @@ function findConnectedComponents(binaryImage) {
                 const w = maxX - minX + 1;
                 const h = maxY - minY + 1;
                 const aspectRatio = w / h;
-                const area = pixelCount;
                 const solidity = area / (w * h);
                 
                 components.push({
@@ -230,7 +259,8 @@ function findConnectedComponents(binaryImage) {
                     h: h,
                     area: area,
                     aspectRatio: aspectRatio,
-                    solidity: solidity
+                    solidity: solidity,
+                    pixels: pixels
                 });
             }
         }
@@ -239,37 +269,99 @@ function findConnectedComponents(binaryImage) {
     return components;
 }
 
-// 進階預處理 (對應 p.py 中的 advanced_preprocess)
-function advancedPreprocess(roiImage) {
-    const { data, width, height } = roiImage;
+// 膨脹操作 (2x2 核)
+function dilateBinary(binaryImage, kernelSize = 2) {
+    const { data, width, height } = binaryImage;
+    const result = new Uint8Array(width * height);
     
-    // 1. 膨脹操作 (簡化版本)
-    const dilatedData = new Uint8Array(width * height);
+    const half = Math.floor(kernelSize / 2);
+    
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = y * width + x;
             let maxVal = 0;
             
-            // 2x2 核膨脹
-            for (let dy = 0; dy <= 1; dy++) {
-                for (let dx = 0; dx <= 1; dx++) {
-                    const nx = x + dx;
-                    const ny = y + dy;
-                    if (nx < width && ny < height) {
+            // 檢查核範圍
+            for (let ky = -half; ky <= half; ky++) {
+                for (let kx = -half; kx <= half; kx++) {
+                    const nx = x + kx;
+                    const ny = y + ky;
+                    
+                    if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
                         const nIdx = ny * width + nx;
                         maxVal = Math.max(maxVal, data[nIdx]);
                     }
                 }
             }
             
-            dilatedData[idx] = maxVal;
+            result[idx] = maxVal;
         }
     }
     
-    // 2. 動態 Padding
-    const padding = Math.floor(Math.max(height, width) * 0.45);
-    const paddedWidth = width + 2 * padding;
-    const paddedHeight = height + 2 * padding;
+    return { data: result, width, height };
+}
+
+// 計算圖像矩 (用於質心計算)
+function calculateImageMoments(binaryImage) {
+    const { data, width, height } = binaryImage;
+    
+    let m00 = 0, m10 = 0, m01 = 0;
+    
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const idx = y * width + x;
+            if (data[idx] > 0) {
+                const value = data[idx] / 255; // 正規化到 0-1
+                m00 += value;
+                m10 += x * value;
+                m01 += y * value;
+            }
+        }
+    }
+    
+    return { m00, m10, m01 };
+}
+
+// 進階預處理 (完全移植自 p.py 的 advanced_preprocess)
+function advancedPreprocess(roiImage) {
+    const { data, width, height } = roiImage;
+    
+    // 1. 建立二值化陣列
+    const binaryArray = new Uint8Array(width * height);
+    for (let i = 0; i < data.length; i++) {
+        binaryArray[i] = data[i] > 128 ? 255 : 0;
+    }
+    
+    // 2. 膨脹：使用 2x2 核
+    const kernelSize = 2;
+    const halfKernel = Math.floor(kernelSize / 2);
+    const dilated = new Uint8Array(width * height);
+    
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const idx = y * width + x;
+            let maxVal = 0;
+            
+            for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+                for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+                    const nx = x + kx;
+                    const ny = y + ky;
+                    
+                    if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                        const nIdx = ny * width + nx;
+                        maxVal = Math.max(maxVal, binaryArray[nIdx]);
+                    }
+                }
+            }
+            
+            dilated[idx] = maxVal;
+        }
+    }
+    
+    // 3. 動態 Padding
+    const pad = Math.floor(Math.max(height, width) * 0.45);
+    const paddedWidth = width + 2 * pad;
+    const paddedHeight = height + 2 * pad;
     
     const paddedData = new Uint8Array(paddedWidth * paddedHeight);
     
@@ -282,74 +374,75 @@ function advancedPreprocess(roiImage) {
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const srcIdx = y * width + x;
-            const dstIdx = (y + padding) * paddedWidth + (x + padding);
-            paddedData[dstIdx] = dilatedData[srcIdx];
+            const dstIdx = (y + pad) * paddedWidth + (x + pad);
+            paddedData[dstIdx] = dilated[srcIdx];
         }
     }
     
-    // 3. 縮放至 28x28
+    // 4. 縮放至 28x28 (使用最近鄰插值)
     const targetSize = 28;
     const scaledData = new Uint8Array(targetSize * targetSize);
     
-    const scaleX = paddedWidth / targetSize;
-    const scaleY = paddedHeight / targetSize;
+    const xRatio = paddedWidth / targetSize;
+    const yRatio = paddedHeight / targetSize;
     
     for (let y = 0; y < targetSize; y++) {
         for (let x = 0; x < targetSize; x++) {
-            const srcX = Math.floor(x * scaleX);
-            const srcY = Math.floor(y * scaleY);
+            const srcX = Math.floor(x * xRatio);
+            const srcY = Math.floor(y * yRatio);
             const srcIdx = srcY * paddedWidth + srcX;
             const dstIdx = y * targetSize + x;
             scaledData[dstIdx] = paddedData[srcIdx];
         }
     }
     
-    // 4. 質心校正
-    let sumX = 0, sumY = 0, total = 0;
-    for (let y = 0; y < targetSize; y++) {
-        for (let x = 0; x < targetSize; x++) {
-            const idx = y * targetSize + x;
-            if (scaledData[idx] > 128) {
-                sumX += x;
-                sumY += y;
-                total++;
+    // 5. 質心校正
+    const moments = calculateImageMoments({ data: scaledData, width: targetSize, height: targetSize });
+    
+    if (moments.m00 !== 0) {
+        const cx = moments.m10 / moments.m00;
+        const cy = moments.m01 / moments.m00;
+        
+        // 計算平移矩陣
+        const dx = 14 - cx;
+        const dy = 14 - cy;
+        
+        const correctedData = new Uint8Array(targetSize * targetSize);
+        
+        // 應用仿射變換
+        for (let y = 0; y < targetSize; y++) {
+            for (let x = 0; x < targetSize; x++) {
+                const srcX = Math.round(x - dx);
+                const srcY = Math.round(y - dy);
+                
+                if (srcX >= 0 && srcX < targetSize && srcY >= 0 && srcY < targetSize) {
+                    const srcIdx = srcY * targetSize + srcX;
+                    correctedData[y * targetSize + x] = scaledData[srcIdx];
+                } else {
+                    correctedData[y * targetSize + x] = 0;
+                }
             }
         }
-    }
-    
-    let cx = 14, cy = 14;
-    if (total > 0) {
-        cx = sumX / total;
-        cy = sumY / total;
-    }
-    
-    const dx = 14 - cx;
-    const dy = 14 - cy;
-    
-    const correctedData = new Uint8Array(targetSize * targetSize);
-    
-    for (let y = 0; y < targetSize; y++) {
-        for (let x = 0; x < targetSize; x++) {
-            const srcX = Math.round(x - dx);
-            const srcY = Math.round(y - dy);
-            
-            if (srcX >= 0 && srcX < targetSize && srcY >= 0 && srcY < targetSize) {
-                const srcIdx = srcY * targetSize + srcX;
-                correctedData[y * targetSize + x] = scaledData[srcIdx];
-            } else {
-                correctedData[y * targetSize + x] = 0;
-            }
+        
+        // 6. 歸一化到 0-1 範圍
+        const normalizedData = new Float32Array(targetSize * targetSize);
+        for (let i = 0; i < correctedData.length; i++) {
+            normalizedData[i] = correctedData[i] / 255.0;
         }
+        
+        return normalizedData;
+    } else {
+        // 如果 m00 為 0，直接返回縮放後的數據
+        const normalizedData = new Float32Array(targetSize * targetSize);
+        for (let i = 0; i < scaledData.length; i++) {
+            normalizedData[i] = scaledData[i] / 255.0;
+        }
+        
+        return normalizedData;
     }
-    
-    return correctedData;
 }
 
-// --- 主辨識函數 ---
-async function predictManual() {
-    return await predict(false);
-}
-
+// --- 主辨識函數 (完全移植自 p.py 的 predict 函數) ---
 async function predict(isRealtime = false) {
     // 防止重複處理
     if (isProcessing) return;
@@ -386,74 +479,45 @@ async function predict(isRealtime = false) {
         // 繪製手寫畫布
         tempCtx.drawImage(canvas, 0, 0);
         
+        // 獲取影像數據
         const imageData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
         
-        // 檢查影像是否為空
-        let isEmpty = true;
-        for (let i = 0; i < imageData.data.length; i += 4) {
-            const gray = (imageData.data[i] + imageData.data[i + 1] + imageData.data[i + 2]) / 3;
-            if (gray > 10 && gray < 245) {
-                isEmpty = false;
-                break;
-            }
+        // 1. 轉為灰階
+        const grayImage = imageDataToGrayArray(imageData);
+        
+        // 2. 背景反轉檢測
+        const avgBrightness = calculateAverageBrightness(grayImage);
+        let processedGray = grayImage;
+        
+        if (avgBrightness > 120) {
+            processedGray = invertBackground(grayImage);
         }
         
-        if (isEmpty) {
-            digitDisplay.innerText = "---";
-            confDetails.innerText = "請在畫布上書寫數字";
-            isProcessing = false;
-            return;
-        }
-        
-        // 1. 計算平均亮度
-        let totalBrightness = 0;
-        for (let i = 0; i < imageData.data.length; i += 4) {
-            const gray = (imageData.data[i] + imageData.data[i + 1] + imageData.data[i + 2]) / 3;
-            totalBrightness += gray;
-        }
-        const avgBrightness = totalBrightness / (imageData.data.length / 4);
-        
-        // 2. 轉為灰階並可能反轉
-        const grayImageData = new ImageData(canvas.width, canvas.height);
-        for (let i = 0; i < imageData.data.length; i += 4) {
-            let gray = (imageData.data[i] + imageData.data[i + 1] + imageData.data[i + 2]) / 3;
-            
-            // 背景反轉檢測
-            if (avgBrightness > 120) {
-                gray = 255 - gray;
-            }
-            
-            grayImageData.data[i] = gray;
-            grayImageData.data[i + 1] = gray;
-            grayImageData.data[i + 2] = gray;
-            grayImageData.data[i + 3] = 255;
-        }
-        
-        // 3. 高斯模糊
-        const blurred = simpleGaussianBlur(grayImageData);
+        // 3. 高斯模糊 (去噪)
+        const blurred = simpleGaussianBlur(processedGray);
         
         // 4. Otsu 二值化
-        const threshold = calculateOtsuThreshold(blurred);
-        const binaryImage = binarizeImage(blurred, threshold);
+        const otsuThreshold = calculateOtsuThreshold(blurred);
+        const binaryImage = binarizeImage(blurred, otsuThreshold);
         
         // 5. 連通域分析
         const components = findConnectedComponents(binaryImage);
         
-        // 6. 過濾連通域
+        // 6. 過濾連通域 (完全移植自 p.py 的過濾邏輯)
         const MIN_AREA = isRealtime ? 500 : 150;
         const filteredComponents = [];
         
         for (const comp of components) {
-            // 面積過小
+            // 1. 面積過小則視為雜訊
             if (comp.area < MIN_AREA) continue;
             
-            // 排除過於細長或寬大的線條
+            // 2. 排除過於細長或寬大的線條
             if (comp.aspectRatio > 2.5 || comp.aspectRatio < 0.15) continue;
             
-            // Solidity (填滿率) 檢查
+            // 3. Solidity (填滿率) 檢查
             if (comp.solidity < 0.15) continue;
             
-            // 邊緣無效區過濾
+            // 4. 邊緣無效區過濾
             const border = 8;
             if (comp.x < border || comp.y < border || 
                 (comp.x + comp.w) > (canvas.width - border) || 
@@ -474,37 +538,37 @@ async function predict(isRealtime = false) {
         // 7. 對每個區域進行辨識
         for (const comp of filteredComponents) {
             // 提取 ROI 數據
-            const roiBinaryData = {
+            const roiData = {
                 data: new Uint8Array(comp.w * comp.h),
                 width: comp.w,
                 height: comp.h
             };
             
-            // 從原始二值化影像中提取 ROI
+            // 從二值化影像中提取 ROI
             for (let y = 0; y < comp.h; y++) {
                 for (let x = 0; x < comp.w; x++) {
                     const srcX = comp.x + x;
                     const srcY = comp.y + y;
                     const srcIdx = srcY * canvas.width + srcX;
                     const dstIdx = y * comp.w + x;
-                    roiBinaryData.data[dstIdx] = binaryImage.data[srcIdx];
+                    roiData.data[dstIdx] = binaryImage.data[srcIdx];
                 }
             }
             
-            // 連體字切割邏輯 (處理寬度大於高度1.3倍的區域)
+            // 連體字切割邏輯 (完全移植自 p.py)
             if (comp.w > comp.h * 1.3) {
                 // 水平投影
                 const projection = new Array(comp.w).fill(0);
                 for (let x = 0; x < comp.w; x++) {
                     for (let y = 0; y < comp.h; y++) {
                         const idx = y * comp.w + x;
-                        if (roiBinaryData.data[idx] === 255) {
+                        if (roiData.data[idx] === 255) {
                             projection[x]++;
                         }
                     }
                 }
                 
-                // 找到分割點
+                // 找到分割點 (在寬度的 30%-70% 之間尋找最小值)
                 const start = Math.floor(comp.w * 0.3);
                 const end = Math.floor(comp.w * 0.7);
                 let minVal = comp.h + 1;
@@ -519,41 +583,34 @@ async function predict(isRealtime = false) {
                 
                 // 分割成兩個子區域
                 const subRegions = [
-                    { x: 0, width: splitX, height: comp.h },
-                    { x: splitX, width: comp.w - splitX, height: comp.h }
+                    { x: 0, w: splitX, h: comp.h },
+                    { x: splitX, w: comp.w - splitX, h: comp.h }
                 ];
                 
                 for (const subRegion of subRegions) {
-                    if (subRegion.width < 5) continue;
+                    if (subRegion.w < 5) continue;
                     
                     // 提取子區域
                     const subData = {
-                        data: new Uint8Array(subRegion.width * subRegion.height),
-                        width: subRegion.width,
-                        height: subRegion.height
+                        data: new Uint8Array(subRegion.w * subRegion.h),
+                        width: subRegion.w,
+                        height: subRegion.h
                     };
                     
-                    for (let y = 0; y < subRegion.height; y++) {
-                        for (let x = 0; x < subRegion.width; x++) {
+                    for (let y = 0; y < subRegion.h; y++) {
+                        for (let x = 0; x < subRegion.w; x++) {
                             const srcX = subRegion.x + x;
                             const srcIdx = y * comp.w + srcX;
-                            const dstIdx = y * subRegion.width + x;
-                            subData.data[dstIdx] = roiBinaryData.data[srcIdx];
+                            const dstIdx = y * subRegion.w + x;
+                            subData.data[dstIdx] = roiData.data[srcIdx];
                         }
                     }
                     
                     // 進階預處理
                     const processedData = advancedPreprocess(subData);
                     
-                    // 轉換為 Tensor
-                    const floatData = new Float32Array(processedData.length);
-                    for (let i = 0; i < processedData.length; i++) {
-                        floatData[i] = processedData[i] / 255.0;
-                    }
-                    
-                    const tensor = tf.tensor4d(floatData, [1, 28, 28, 1]);
-                    
-                    // 預測
+                    // 轉換為 Tensor 並預測
+                    const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
                     const prediction = model.predict(tensor);
                     const scores = await prediction.data();
                     const digit = prediction.argMax(-1).dataSync()[0];
@@ -576,17 +633,10 @@ async function predict(isRealtime = false) {
             
             // 一般數字預測
             // 進階預處理
-            const processedData = advancedPreprocess(roiBinaryData);
+            const processedData = advancedPreprocess(roiData);
             
-            // 轉換為 Tensor
-            const floatData = new Float32Array(processedData.length);
-            for (let i = 0; i < processedData.length; i++) {
-                floatData[i] = processedData[i] / 255.0;
-            }
-            
-            const tensor = tf.tensor4d(floatData, [1, 28, 28, 1]);
-            
-            // 預測
+            // 轉換為 Tensor 並預測
+            const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
             const prediction = model.predict(tensor);
             const scores = await prediction.data();
             const digit = prediction.argMax(-1).dataSync()[0];
@@ -595,7 +645,7 @@ async function predict(isRealtime = false) {
             tensor.dispose();
             prediction.dispose();
             
-            // 信心度過濾
+            // 信心度過濾 (即時模式提高要求)
             if (isRealtime && confidence < 0.85) {
                 continue;
             }
@@ -944,13 +994,9 @@ function toggleVoice() {
         addVisualFeedback("#34495e");
     } else {
         try {
-            // 請求麥克風權限
             navigator.mediaDevices.getUserMedia({ audio: true })
                 .then(stream => {
-                    // 停止音訊串流以避免佔用麥克風
                     stream.getTracks().forEach(track => track.stop());
-                    
-                    // 啟動語音識別
                     recognition.start();
                     updateVoiceButton();
                     addVisualFeedback("#ff6b9d");
@@ -990,8 +1036,6 @@ function startDrawing(e) {
     
     ctx.beginPath();
     ctx.moveTo(x, y);
-    ctx.lineTo(x, y);
-    ctx.stroke();
     
     lastX = x;
     lastY = y;
@@ -1004,10 +1048,11 @@ function draw(e) {
     
     const { x, y } = getCanvasCoordinates(e);
     
-    ctx.beginPath();
-    ctx.moveTo(lastX, lastY);
     ctx.lineTo(x, y);
     ctx.stroke();
+    
+    ctx.beginPath();
+    ctx.moveTo(x, y);
     
     lastX = x;
     lastY = y;
@@ -1048,5 +1093,14 @@ canvas.addEventListener('touchstart', handleTouchStart);
 canvas.addEventListener('touchmove', handleTouchMove);
 canvas.addEventListener('touchend', stopDrawing);
 
-// 初始化系統
-init();
+// 綁定按鈕事件
+document.addEventListener('DOMContentLoaded', () => {
+    const predictBtn = document.querySelector('.btn-run');
+    const clearBtn = document.querySelector('.btn-clear');
+    
+    if (predictBtn) predictBtn.onclick = () => predict(false);
+    if (clearBtn) clearBtn.onclick = clearCanvas;
+    
+    // 初始化系統
+    init();
+});
