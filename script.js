@@ -1,7 +1,6 @@
 /**
  * 🌌 銀河手寫數字辨識系統 - 完整修復版
- * 修復了 WebGL 錯誤和語音識別重複啟動問題
- * 完全前端運行，無需後端伺服器
+ * 修復了畫筆延伸bug、開關狀態bug和圖片上傳bug
  */
 
 // ==================== 全局變量初始化 ====================
@@ -22,6 +21,8 @@ let isVoiceActive = false;
 let isProcessing = false;
 let lastX = 0;
 let lastY = 0;
+let isCameraOn = false; // 新增：追蹤相機狀態
+let drawingHistory = []; // 新增：記錄繪圖歷史
 
 // ==================== Keras v3 兼容性修復 ====================
 class PatchModelLoader {
@@ -177,7 +178,7 @@ async function loadModel() {
     }
 }
 
-// ==================== 影像處理函數 (完整移植自 p.py) ====================
+// ==================== 影像處理函數 ====================
 
 // 轉換 ImageData 為灰階陣列
 function imageDataToGrayArray(imageData) {
@@ -250,7 +251,7 @@ function simpleGaussianBlur(grayArray) {
     return { data: result, width, height };
 }
 
-// Otsu 閾值計算 (完全移植自 OpenCV 算法)
+// Otsu 閾值計算
 function calculateOtsuThreshold(grayArray) {
     const { data } = grayArray;
     
@@ -438,7 +439,7 @@ function calculateImageMoments(binaryImage) {
     return { m00, m10, m01 };
 }
 
-// 進階預處理 (完全移植自 p.py 的 advanced_preprocess)
+// 進階預處理
 function advancedPreprocess(roiImage) {
     const { data, width, height } = roiImage;
     
@@ -608,7 +609,7 @@ async function predict(isRealtime = false) {
         // 5. 連通域分析
         const components = findConnectedComponents(binaryImage);
         
-        // 6. 過濾連通域 (完全移植自 p.py 的過濾邏輯)
+        // 6. 過濾連通域
         const MIN_AREA = isRealtime ? 500 : 150;
         const filteredComponents = [];
         
@@ -660,7 +661,7 @@ async function predict(isRealtime = false) {
                 }
             }
             
-            // 連體字切割邏輯 (完全移植自 p.py)
+            // 連體字切割邏輯
             if (comp.w > comp.h * 1.3) {
                 // 水平投影
                 const projection = new Array(comp.w).fill(0);
@@ -890,6 +891,7 @@ function clearCanvas() {
     }
     digitDisplay.innerText = "---";
     confDetails.innerText = "🪐 畫布已清空，請重新書寫";
+    drawingHistory = []; // 清空繪圖歷史
     addVisualFeedback("#2ecc71");
     addGalaxyEffects();
 }
@@ -907,14 +909,24 @@ function addVisualFeedback(color) {
     });
 }
 
-// 相機功能
+// 相機功能 - 修復版本
 async function toggleCamera() {
+    const camToggleBtn = document.getElementById('camToggleBtn');
+    
+    // 如果正在開啟相機，直接返回
+    if (isProcessing && isCameraOn === false) return;
+    
     if (cameraStream) {
+        // 關閉相機
         stopCamera();
+        camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
+        camToggleBtn.classList.remove('cam-active');
+        isCameraOn = false;
         return;
     }
     
     try {
+        isProcessing = true;
         cameraStream = await navigator.mediaDevices.getUserMedia({
             video: { 
                 facingMode: "environment",
@@ -928,22 +940,28 @@ async function toggleCamera() {
         video.style.display = "block";
         document.getElementById('mainBox').classList.add('cam-active');
         
-        const camToggleBtn = document.getElementById('camToggleBtn');
-        if (camToggleBtn) {
-            camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 關閉鏡頭';
-        }
+        camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 關閉鏡頭';
+        camToggleBtn.classList.add('cam-active');
+        isCameraOn = true;
         
         // 開始即時辨識
         realtimeInterval = setInterval(async () => {
             await predict(true);
-        }, 800); // 降低頻率以減少性能壓力
+        }, 800);
         
         clearCanvas();
         addVisualFeedback("#9b59b6");
+        isProcessing = false;
         
     } catch (err) {
         console.error('鏡頭啟動失敗:', err);
         alert("無法啟動鏡頭：請確保已授予相機權限");
+        isCameraOn = false;
+        isProcessing = false;
+        
+        // 更新按鈕狀態
+        camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
+        camToggleBtn.classList.remove('cam-active');
     }
 }
 
@@ -962,19 +980,16 @@ function stopCamera() {
     video.style.display = "none";
     document.getElementById('mainBox').classList.remove('cam-active');
     
-    const camToggleBtn = document.getElementById('camToggleBtn');
-    if (camToggleBtn) {
-        camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
-    }
-    
-    init(); // 重新初始化畫布
-    addVisualFeedback("#34495e");
+    // 重置畫布
+    clearCanvas();
 }
 
-// 檔案上傳
+// 檔案上傳 - 修復版本
 function triggerFile() {
     const fileInput = document.getElementById('fileInput');
     if (fileInput) {
+        // 重置檔案輸入，確保可以重新選擇同一檔案
+        fileInput.value = '';
         fileInput.click();
     }
     addVisualFeedback("#3498db");
@@ -985,7 +1000,9 @@ function handleFile(event) {
     if (!file) return;
     
     // 如果相機開啟，先關閉
-    if (cameraStream) stopCamera();
+    if (cameraStream) {
+        stopCamera();
+    }
     
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -1008,8 +1025,19 @@ function handleFile(event) {
             ctx.drawImage(img, x, y, w, h);
             predict(false);
             addVisualFeedback("#3498db");
+            
+            // 重置檔案輸入，以便下次可以上傳同一檔案
+            event.target.value = '';
+        };
+        img.onerror = () => {
+            alert('圖片載入失敗，請嘗試其他圖片');
+            event.target.value = ''; // 重置檔案輸入
         };
         img.src = e.target.result;
+    };
+    reader.onerror = () => {
+        alert('檔案讀取失敗，請重新選擇');
+        event.target.value = ''; // 重置檔案輸入
     };
     reader.readAsDataURL(file);
 }
@@ -1028,7 +1056,7 @@ function updateDetails(data) {
     confDetails.innerHTML = html;
 }
 
-// ==================== 語音功能 (修復重複啟動錯誤) ====================
+// ==================== 語音功能 (修復版本) ====================
 
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1048,19 +1076,17 @@ function initSpeechRecognition() {
     const MAX_RETRIES = 3;
     
     recognition.onstart = () => {
-        isVoiceActive = true;
+        console.log('語音識別已啟動');
         retryCount = 0; // 重置重試計數
-        updateVoiceButton();
         if (voiceStatus) {
             voiceStatus.style.display = 'block';
             voiceStatus.innerHTML = '<span class="pulse-icon">🎙️</span> 語音辨識已啟動';
         }
         addVisualFeedback("#ff6b9d");
-        console.log('語音識別已啟動');
     };
     
     recognition.onend = () => {
-        console.log('語音識別結束，當前狀態:', { isVoiceActive, retryCount });
+        console.log('語音識別結束');
         
         // 只有在用戶未主動關閉且重試次數未超限時才重啟
         if (isVoiceActive && retryCount < MAX_RETRIES) {
@@ -1075,32 +1101,14 @@ function initSpeechRecognition() {
                     }
                 } catch (e) {
                     console.log('語音識別重啟失敗:', e);
-                    if (e.name === 'InvalidStateError') {
-                        // 忽略 "already started" 錯誤
-                        return;
-                    }
-                    
                     if (retryCount >= MAX_RETRIES) {
                         console.log('達到最大重試次數，停止語音識別');
                         isVoiceActive = false;
                         updateVoiceButton();
                         if (voiceStatus) voiceStatus.style.display = 'none';
-                        
-                        // 通知用戶
-                        confDetails.innerHTML = `
-                            <span style="color: #f39c12">
-                                🎙️ 語音識別暫時關閉<br>
-                                <small>麥克風權限可能已被其他應用佔用</small>
-                            </span>
-                        `;
-                        setTimeout(() => {
-                            if (!isVoiceActive) {
-                                confDetails.innerText = "請在畫布上書寫數字";
-                            }
-                        }, 3000);
                     }
                 }
-            }, 1000); // 1秒後重試
+            }, 1000);
         } else {
             // 用戶主動關閉或達到最大重試次數
             updateVoiceButton();
@@ -1190,40 +1198,39 @@ function toggleVoice() {
         updateVoiceButton();
         if (voiceStatus) {
             voiceStatus.style.display = 'none';
-            voiceStatus.innerHTML = '<span class="pulse-icon">🎙️</span> 正在聆聽語音指令...';
         }
         addVisualFeedback("#34495e");
         console.log('用戶手動關閉語音識別');
     } else {
         // 用戶嘗試開啟
         try {
-            // 先檢查麥克風權限
+            isVoiceActive = true;
+            recognition.start();
+            updateVoiceButton();
+            addVisualFeedback("#ff6b9d");
+            console.log('用戶手動開啟語音識別');
+        } catch (e) {
+            console.log("語音識別啟動錯誤:", e);
+            isVoiceActive = false;
+            updateVoiceButton();
+            
+            // 嘗試獲取麥克風權限
             navigator.mediaDevices.getUserMedia({ audio: true })
                 .then(stream => {
-                    // 停止測試流
                     stream.getTracks().forEach(track => track.stop());
-                    
-                    // 啟動語音識別
                     isVoiceActive = true;
                     recognition.start();
                     updateVoiceButton();
-                    addVisualFeedback("#ff6b9d");
-                    console.log('用戶手動開啟語音識別');
                 })
                 .catch(err => {
                     console.log("麥克風權限錯誤:", err);
                     alert("請允許使用麥克風以啟用語音輸入功能");
-                    isVoiceActive = false;
-                    updateVoiceButton();
                 });
-        } catch (e) {
-            console.log("語音識別啟動錯誤:", e);
-            alert("無法啟動語音識別功能");
         }
     }
 }
 
-// ==================== 繪圖事件處理 ====================
+// ==================== 繪圖事件處理 (修復畫筆延伸bug) ====================
 
 function getCanvasCoordinates(e) {
     const rect = canvas.getBoundingClientRect();
@@ -1237,42 +1244,78 @@ function getCanvasCoordinates(e) {
         y = e.clientY - rect.top;
     }
     
+    // 確保坐標在畫布範圍內
+    x = Math.max(0, Math.min(x, canvas.width));
+    y = Math.max(0, Math.min(y, canvas.height));
+    
     return { x, y };
 }
 
 function startDrawing(e) {
     e.preventDefault();
+    
+    // 如果是相機模式，不允許繪圖
+    if (cameraStream) return;
+    
     isDrawing = true;
     const { x, y } = getCanvasCoordinates(e);
     
+    // 開始新路徑
     ctx.beginPath();
     ctx.moveTo(x, y);
     
+    // 記錄起始點
     lastX = x;
     lastY = y;
+    
+    // 記錄繪圖歷史
+    drawingHistory.push({
+        type: 'start',
+        x: x,
+        y: y,
+        isEraser: isEraser
+    });
 }
 
 function draw(e) {
     e.preventDefault();
     
-    if (!isDrawing) return;
+    // 如果不是繪圖狀態或相機模式，直接返回
+    if (!isDrawing || cameraStream) return;
     
     const { x, y } = getCanvasCoordinates(e);
     
+    // 計算距離，避免太短的線條
+    const distance = Math.sqrt((x - lastX) ** 2 + (y - lastY) ** 2);
+    if (distance < 1) return; // 距離太短不繪製
+    
+    // 繪製線條
     ctx.lineTo(x, y);
     ctx.stroke();
     
+    // 記錄當前點作為下一段的起點
     ctx.beginPath();
     ctx.moveTo(x, y);
     
+    // 更新最後位置
     lastX = x;
     lastY = y;
+    
+    // 記錄繪圖歷史
+    drawingHistory.push({
+        type: 'draw',
+        x: x,
+        y: y,
+        isEraser: isEraser
+    });
 }
 
 function stopDrawing() {
     if (isDrawing) {
         isDrawing = false;
         ctx.beginPath();
+        
+        // 如果不是相機模式，進行辨識
         if (!cameraStream) {
             setTimeout(() => predict(false), 300);
         }
@@ -1356,6 +1399,8 @@ setInterval(() => {
         const memoryInfo = tf.memory();
         if (memoryInfo.numTensors > 100) {
             console.warn(`TensorFlow.js 內存警告: ${memoryInfo.numTensors} 個張量`);
+            // 清理未使用的張量
+            tf.disposeVariables();
         }
     } catch (e) {
         // 忽略內存檢查錯誤
