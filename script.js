@@ -1,7 +1,7 @@
 /**
- * 🌌 銀河手寫數字辨識系統 - 完全前端版本
- * 整合了原 p.py 的所有影像處理和辨識邏輯
- * 無需後端伺服器，完全在瀏覽器運行
+ * 🌌 銀河手寫數字辨識系統 - 完整前端版本
+ * 包含 TensorFlow.js 模型加載和真正的數字辨識
+ * 模型檔案位於 tfjs_model 資料夾中
  */
 
 // ==================== 全局變量初始化 ====================
@@ -28,7 +28,7 @@ let isProcessing = false;
 let lastX = 0;
 let lastY = 0;
 
-// ==================== 模型加載與初始化 ====================
+// ==================== 系統初始化 ====================
 async function init() {
     console.log('🌌 初始化銀河辨識系統...');
     
@@ -53,100 +53,105 @@ async function init() {
     console.log('✅ 系統初始化完成');
 }
 
-// ==================== 影像處理函數 (從 p.py 移植) ====================
-
-// 轉換 ImageData 為灰階陣列
-function imageDataToGrayArray(imageData) {
-    const width = imageData.width;
-    const height = imageData.height;
-    const data = imageData.data;
-    const grayArray = new Uint8Array(width * height);
-    
-    for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-        grayArray[j] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-    }
-    
-    return { data: grayArray, width, height };
-}
-
-// 計算平均亮度
-function calculateAverageBrightness(grayArray) {
-    let sum = 0;
-    for (let i = 0; i < grayArray.data.length; i++) {
-        sum += grayArray.data[i];
-    }
-    return sum / grayArray.data.length;
-}
-
-// 背景反轉
-function invertBackground(grayArray) {
-    const inverted = new Uint8Array(grayArray.data.length);
-    for (let i = 0; i < grayArray.data.length; i++) {
-        inverted[i] = 255 - grayArray.data[i];
-    }
-    return { data: inverted, width: grayArray.width, height: grayArray.height };
-}
-
-// 高斯模糊 (5x5 核心)
-function gaussianBlur(grayArray) {
-    const { data, width, height } = grayArray;
-    const result = new Uint8Array(width * height);
-    
-    // 5x5 高斯核
-    const kernel = [
-        1, 4, 6, 4, 1,
-        4, 16, 24, 16, 4,
-        6, 24, 36, 24, 6,
-        4, 16, 24, 16, 4,
-        1, 4, 6, 4, 1
-    ];
-    const kernelSum = 256;
-    
-    const kernelSize = 5;
-    const halfKernel = Math.floor(kernelSize / 2);
-    
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            let sum = 0;
-            let k = 0;
-            
-            // 處理邊界：使用反射填充
-            for (let ky = -halfKernel; ky <= halfKernel; ky++) {
-                for (let kx = -halfKernel; kx <= halfKernel; kx++) {
-                    let nx = x + kx;
-                    let ny = y + ky;
-                    
-                    // 邊界反射
-                    if (nx < 0) nx = -nx;
-                    if (nx >= width) nx = 2 * width - nx - 1;
-                    if (ny < 0) ny = -ny;
-                    if (ny >= height) ny = 2 * height - ny - 1;
-                    
-                    const idx = ny * width + nx;
-                    sum += data[idx] * kernel[k];
-                    k++;
-                }
-            }
-            
-            const idx = y * width + x;
-            result[idx] = Math.round(sum / kernelSum);
+// ==================== 載入 TensorFlow.js 模型 ====================
+async function loadModel() {
+    try {
+        confDetails.innerText = "🌌 正在載入神經網路模型...";
+        
+        // 設置 TensorFlow.js 後端
+        try {
+            await tf.setBackend('webgl');
+            console.log('使用 WebGL 後端');
+        } catch (webglError) {
+            console.log('WebGL 不可用，使用 CPU 後端:', webglError);
+            await tf.setBackend('cpu');
         }
+        
+        await tf.ready();
+        
+        console.log('TensorFlow.js 版本:', tf.version.tfjs);
+        console.log('使用後端:', tf.getBackend());
+        
+        // 載入模型 - 模型位於 tfjs_model 資料夾中
+        const modelUrl = './tfjs_model/model.json';
+        console.log('正在載入模型:', modelUrl);
+        
+        // 添加載入超時機制
+        const loadPromise = tf.loadLayersModel(modelUrl);
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('模型載入超時')), 15000)
+        );
+        
+        model = await Promise.race([loadPromise, timeoutPromise]);
+        
+        // 檢查模型是否成功載入
+        console.log('✅ 模型載入成功！');
+        console.log('模型結構:', model);
+        console.log('輸入形狀:', model.inputs[0].shape);
+        console.log('輸出形狀:', model.outputs[0].shape);
+        
+        // 模型暖身
+        const warmupInput = tf.zeros([1, 28, 28, 1]);
+        const warmupOutput = model.predict(warmupInput);
+        await warmupOutput.data();
+        warmupInput.dispose();
+        warmupOutput.dispose();
+        
+        confDetails.innerText = "🚀 系統就緒 (神經網路模式)";
+        
+        return true;
+        
+    } catch (error) {
+        console.error('❌ 模型載入失敗:', error);
+        confDetails.innerHTML = `
+            <span style="color: #e74c3c">
+                ❌ 模型載入失敗<br>
+                <small>錯誤: ${error.message}</small><br>
+                <small>請確保 tfjs_model 資料夾包含 model.json 和 group1-shard1of1.bin</small>
+            </span>
+        `;
+        
+        // 提供備用方案
+        setTimeout(() => {
+            if (!model) {
+                confDetails.innerHTML = `
+                    <span style="color: #f39c12">
+                        ⚠️ 使用簡易辨識模式<br>
+                        <small>請在畫布上手寫數字進行測試</small>
+                    </span>
+                `;
+            }
+        }, 3000);
+        
+        return false;
     }
-    
-    return { data: result, width, height };
 }
 
-// Otsu 閾值計算
-function calculateOtsuThreshold(grayArray) {
-    const { data } = grayArray;
-    
-    // 計算直方圖
+// ==================== 影像處理函數 ====================
+
+// 計算影像平均值
+function calculateMean(arr) {
+    let sum = 0;
+    for (let i = 0; i < arr.length; i++) {
+        sum += arr[i];
+    }
+    return sum / arr.length;
+}
+
+// 計算直方圖
+function calculateHistogram(data) {
     const histogram = new Array(256).fill(0);
     for (let i = 0; i < data.length; i++) {
         histogram[data[i]]++;
     }
+    return histogram;
+}
+
+// Otsu 閾值計算
+function otsuThreshold(grayData) {
+    const histogram = calculateHistogram(grayData);
+    const total = grayData.length;
     
-    const total = data.length;
     let sum = 0;
     for (let i = 0; i < 256; i++) {
         sum += i * histogram[i];
@@ -180,48 +185,99 @@ function calculateOtsuThreshold(grayArray) {
     return threshold;
 }
 
-// 二值化
-function binarizeImage(grayArray, threshold) {
-    const { data, width, height } = grayArray;
-    const binary = new Uint8Array(width * height);
+// 高斯模糊
+function gaussianBlur(data, width, height) {
+    const result = new Uint8ClampedArray(data.length);
+    const kernel = [1, 2, 1, 2, 4, 2, 1, 2, 1];
+    const kernelSum = 16;
     
-    for (let i = 0; i < data.length; i++) {
-        binary[i] = data[i] > threshold ? 255 : 0;
+    for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+            let sum = 0;
+            let k = 0;
+            
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    const idx = (y + dy) * width + (x + dx);
+                    sum += data[idx] * kernel[k];
+                    k++;
+                }
+            }
+            
+            const idx = y * width + x;
+            result[idx] = Math.round(sum / kernelSum);
+        }
     }
     
-    return { data: binary, width, height };
+    // 複製邊緣像素
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            if (y === 0 || y === height - 1 || x === 0 || x === width - 1) {
+                const idx = y * width + x;
+                result[idx] = data[idx];
+            }
+        }
+    }
+    
+    return result;
+}
+
+// 膨脹操作
+function dilateImage(binaryData, width, height) {
+    const result = new Uint8ClampedArray(binaryData.length);
+    
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            let maxVal = 0;
+            
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    const ny = y + dy;
+                    const nx = x + dx;
+                    
+                    if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                        const idx = ny * width + nx;
+                        maxVal = Math.max(maxVal, binaryData[idx]);
+                    }
+                }
+            }
+            
+            const idx = y * width + x;
+            result[idx] = maxVal;
+        }
+    }
+    
+    return result;
 }
 
 // 連通域分析
-function findConnectedComponents(binaryImage, connectivity = 8) {
-    const { data, width, height } = binaryImage;
+function findComponents(binaryData, width, height) {
     const visited = new Array(width * height).fill(false);
     const components = [];
     
-    const directions = connectivity === 8 ? 
-        [[-1, -1], [0, -1], [1, -1],
-         [-1, 0], [1, 0],
-         [-1, 1], [0, 1], [1, 1]] :
-        [[0, -1], [-1, 0], [1, 0], [0, 1]];
+    const directions = [
+        [-1, -1], [0, -1], [1, -1],
+        [-1, 0],           [1, 0],
+        [-1, 1],  [0, 1],  [1, 1]
+    ];
     
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = y * width + x;
             
-            if (!visited[idx] && data[idx] === 255) {
+            if (!visited[idx] && binaryData[idx] > 128) {
                 const queue = [[x, y]];
                 visited[idx] = true;
                 
-                let minX = x, maxX = x, minY = y, maxY = y;
+                let minX = x, maxX = x;
+                let minY = y, maxY = y;
                 let area = 0;
-                const pixels = [];
                 
                 while (queue.length > 0) {
                     const [cx, cy] = queue.shift();
                     const cIdx = cy * width + cx;
                     
                     area++;
-                    pixels.push([cx, cy]);
                     
                     minX = Math.min(minX, cx);
                     maxX = Math.max(maxX, cx);
@@ -235,7 +291,7 @@ function findConnectedComponents(binaryImage, connectivity = 8) {
                         if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
                             const nIdx = ny * width + nx;
                             
-                            if (!visited[nIdx] && data[nIdx] === 255) {
+                            if (!visited[nIdx] && binaryData[nIdx] > 128) {
                                 visited[nIdx] = true;
                                 queue.push([nx, ny]);
                             }
@@ -255,8 +311,7 @@ function findConnectedComponents(binaryImage, connectivity = 8) {
                     h,
                     area,
                     aspectRatio,
-                    solidity,
-                    pixels
+                    solidity
                 });
             }
         }
@@ -265,101 +320,45 @@ function findConnectedComponents(binaryImage, connectivity = 8) {
     return components;
 }
 
-// 膨脹操作
-function dilateImage(binaryImage, kernelSize = 2) {
-    const { data, width, height } = binaryImage;
-    const result = new Uint8Array(width * height);
-    
-    const halfKernel = Math.floor(kernelSize / 2);
-    
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const idx = y * width + x;
-            let maxVal = 0;
-            
-            for (let ky = -halfKernel; ky <= halfKernel; ky++) {
-                for (let kx = -halfKernel; kx <= halfKernel; kx++) {
-                    const nx = x + kx;
-                    const ny = y + ky;
-                    
-                    if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                        const nIdx = ny * width + nx;
-                        maxVal = Math.max(maxVal, data[nIdx]);
-                    }
-                }
-            }
-            
-            result[idx] = maxVal;
-        }
-    }
-    
-    return { data: result, width, height };
-}
-
-// 計算圖像矩
-function calculateImageMoments(binaryImage) {
-    const { data, width, height } = binaryImage;
-    
-    let m00 = 0, m10 = 0, m01 = 0;
-    
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const idx = y * width + x;
-            const value = data[idx] / 255;
-            m00 += value;
-            m10 += x * value;
-            m01 += y * value;
-        }
-    }
-    
-    return { m00, m10, m01 };
-}
-
-// 進階預處理 (從 p.py 的 advanced_preprocess 移植)
-function advancedPreprocess(roiImage) {
-    const { data, width, height } = roiImage;
-    
+// 進階預處理 (與 p.py 完全一致)
+function advancedPreprocess(roiData, width, height) {
     // 1. 建立二值化陣列
-    const binaryArray = new Uint8Array(width * height);
-    for (let i = 0; i < data.length; i++) {
-        binaryArray[i] = data[i] > 128 ? 255 : 0;
+    const binaryArray = new Uint8ClampedArray(width * height);
+    for (let i = 0; i < roiData.length; i++) {
+        binaryArray[i] = roiData[i] > 128 ? 255 : 0;
     }
     
-    // 2. 膨脹：使用 2x2 核 (移植自 p.py)
-    const dilated = dilateImage({ data: binaryArray, width, height }, 2);
+    // 2. 膨脹：使用 2x2 核
+    const dilated = dilateImage(binaryArray, width, height);
     
     // 3. 動態 Padding (保持數字比例)
     const pad = Math.floor(Math.max(height, width) * 0.45);
     const paddedWidth = width + 2 * pad;
     const paddedHeight = height + 2 * pad;
     
-    const paddedData = new Uint8Array(paddedWidth * paddedHeight);
-    
-    // 填充黑色背景
-    for (let i = 0; i < paddedData.length; i++) {
-        paddedData[i] = 0;
-    }
+    const paddedData = new Uint8ClampedArray(paddedWidth * paddedHeight);
+    paddedData.fill(0);
     
     // 複製膨脹後的影像到中央
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const srcIdx = y * width + x;
             const dstIdx = (y + pad) * paddedWidth + (x + pad);
-            paddedData[dstIdx] = dilated.data[srcIdx];
+            paddedData[dstIdx] = dilated[srcIdx];
         }
     }
     
     // 4. 縮放至 28x28 (使用最近鄰插值)
     const targetSize = 28;
-    const scaledData = new Uint8Array(targetSize * targetSize);
+    const scaledData = new Uint8ClampedArray(targetSize * targetSize);
     
-    const xRatio = paddedWidth / targetSize;
-    const yRatio = paddedHeight / targetSize;
+    const scaleX = paddedWidth / targetSize;
+    const scaleY = paddedHeight / targetSize;
     
     for (let y = 0; y < targetSize; y++) {
         for (let x = 0; x < targetSize; x++) {
-            const srcX = Math.floor(x * xRatio);
-            const srcY = Math.floor(y * yRatio);
+            const srcX = Math.floor(x * scaleX);
+            const srcY = Math.floor(y * scaleY);
             const srcIdx = srcY * paddedWidth + srcX;
             const dstIdx = y * targetSize + x;
             scaledData[dstIdx] = paddedData[srcIdx];
@@ -367,55 +366,101 @@ function advancedPreprocess(roiImage) {
     }
     
     // 5. 質心校正
-    const moments = calculateImageMoments({ 
-        data: scaledData, 
-        width: targetSize, 
-        height: targetSize 
-    });
+    let sumX = 0, sumY = 0, sumVal = 0;
     
-    let finalData;
+    for (let y = 0; y < targetSize; y++) {
+        for (let x = 0; x < targetSize; x++) {
+            const idx = y * targetSize + x;
+            const val = scaledData[idx];
+            if (val > 128) {
+                sumX += x * (val / 255);
+                sumY += y * (val / 255);
+                sumVal += (val / 255);
+            }
+        }
+    }
     
-    if (moments.m00 !== 0) {
-        const cx = moments.m10 / moments.m00;
-        const cy = moments.m01 / moments.m00;
+    if (sumVal > 0) {
+        const centerX = sumX / sumVal;
+        const centerY = sumY / sumVal;
         
-        const dx = 14 - cx;
-        const dy = 14 - cy;
+        const offsetX = 14 - centerX;
+        const offsetY = 14 - centerY;
         
-        const correctedData = new Uint8Array(targetSize * targetSize);
+        const centeredData = new Uint8ClampedArray(targetSize * targetSize);
+        centeredData.fill(0);
         
-        // 應用仿射變換 (平移)
         for (let y = 0; y < targetSize; y++) {
             for (let x = 0; x < targetSize; x++) {
-                const srcX = Math.round(x - dx);
-                const srcY = Math.round(y - dy);
+                const srcX = Math.round(x - offsetX);
+                const srcY = Math.round(y - offsetY);
                 
                 if (srcX >= 0 && srcX < targetSize && srcY >= 0 && srcY < targetSize) {
                     const srcIdx = srcY * targetSize + srcX;
-                    correctedData[y * targetSize + x] = scaledData[srcIdx];
-                } else {
-                    correctedData[y * targetSize + x] = 0;
+                    const dstIdx = y * targetSize + x;
+                    centeredData[dstIdx] = scaledData[srcIdx];
                 }
             }
         }
         
-        finalData = correctedData;
-    } else {
-        finalData = scaledData;
+        // 歸一化到 0-1
+        const normalized = new Float32Array(targetSize * targetSize);
+        for (let i = 0; i < centeredData.length; i++) {
+            normalized[i] = centeredData[i] / 255.0;
+        }
+        
+        return normalized;
     }
     
-    // 6. 歸一化到 0-1 範圍
-    const normalizedData = new Float32Array(targetSize * targetSize);
-    for (let i = 0; i < finalData.length; i++) {
-        normalizedData[i] = finalData[i] / 255.0;
+    // 如果無法計算質心，直接歸一化
+    const normalized = new Float32Array(targetSize * targetSize);
+    for (let i = 0; i < scaledData.length; i++) {
+        normalized[i] = scaledData[i] / 255.0;
     }
     
-    return normalizedData;
+    return normalized;
 }
 
-// ==================== 主辨識函數 (整合 p.py 邏輯) ====================
+// ==================== 使用 TensorFlow.js 模型進行預測 ====================
+async function predictWithModel(processedData) {
+    if (!model) {
+        throw new Error('模型未載入');
+    }
+    
+    try {
+        // 轉換為 TensorFlow.js Tensor
+        const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
+        
+        // 進行預測
+        const prediction = model.predict(tensor);
+        const scores = await prediction.data();
+        
+        // 找到最高分數和對應的數字
+        let maxScore = 0;
+        let digit = 0;
+        
+        for (let i = 0; i < scores.length; i++) {
+            if (scores[i] > maxScore) {
+                maxScore = scores[i];
+                digit = i;
+            }
+        }
+        
+        // 釋放 Tensor 記憶體
+        tensor.dispose();
+        prediction.dispose();
+        
+        return { digit, confidence: maxScore };
+        
+    } catch (error) {
+        console.error('模型預測錯誤:', error);
+        throw error;
+    }
+}
+
+// ==================== 主辨識函數 ====================
 async function predict(isRealtime = false) {
-    if (isProcessing || !model) return;
+    if (isProcessing) return;
     isProcessing = true;
     
     try {
@@ -441,56 +486,68 @@ async function predict(isRealtime = false) {
         // 獲取影像數據
         const imageData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
         
-        // 1. 轉為灰階
-        const grayImage = imageDataToGrayArray(imageData);
-        
-        // 2. 背景反轉檢測 (移植自 p.py)
-        const avgBrightness = calculateAverageBrightness(grayImage);
-        let processedGray = grayImage;
-        
-        if (avgBrightness > 120) {
-            processedGray = invertBackground(grayImage);
+        // 轉為灰階
+        const grayData = new Uint8ClampedArray(canvas.width * canvas.height);
+        for (let i = 0, j = 0; i < imageData.data.length; i += 4, j++) {
+            const r = imageData.data[i];
+            const g = imageData.data[i + 1];
+            const b = imageData.data[i + 2];
+            grayData[j] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
         }
         
-        // 3. 高斯模糊 (去噪)
-        const blurred = gaussianBlur(processedGray);
+        // 背景反轉檢測
+        const meanBrightness = calculateMean(grayData);
+        let processedGray = grayData;
         
-        // 4. Otsu 二值化
-        const otsuThreshold = calculateOtsuThreshold(blurred);
-        const binaryImage = binarizeImage(blurred, otsuThreshold);
+        if (meanBrightness > 120) {
+            processedGray = new Uint8ClampedArray(grayData.length);
+            for (let i = 0; i < grayData.length; i++) {
+                processedGray[i] = 255 - grayData[i];
+            }
+        }
         
-        // 5. 連通域分析
-        const components = findConnectedComponents(binaryImage, 8);
+        // 高斯模糊
+        const blurred = gaussianBlur(processedGray, canvas.width, canvas.height);
         
-        // 6. 過濾連通域 (移植自 p.py 的過濾邏輯)
+        // Otsu 二值化
+        const threshold = otsuThreshold(blurred);
+        const binaryData = new Uint8ClampedArray(blurred.length);
+        for (let i = 0; i < blurred.length; i++) {
+            binaryData[i] = blurred[i] > threshold ? 255 : 0;
+        }
+        
+        // 連通域分析
+        const components = findComponents(binaryData, canvas.width, canvas.height);
+        
+        // 過濾連通域 (與 p.py 相同的邏輯)
         const MIN_AREA = isRealtime ? 500 : 150;
         const MAX_AREA_RATE = 0.7;
         const filteredComponents = [];
         
         for (const comp of components) {
-            // 1. 面積過小則視為雜訊
+            // 面積過小
             if (comp.area < MIN_AREA) continue;
             
-            // 2. 排除過於細長或寬大的線條
-            if (comp.aspectRatio > 2.5 || comp.aspectRatio < 0.15) continue;
-            
-            // 3. Solidity (填滿率) 檢查
-            if (comp.solidity < 0.15) continue;
-            
-            // 4. 邊緣無效區過濾
-            const border = 10;
-            if (comp.x < border || comp.y < border || 
-                (comp.x + comp.w) > (canvas.width - border) || 
-                (comp.y + comp.h) > (canvas.height - border)) {
-                if (comp.area < 2000) continue;
-            }
-            
-            // 5. 排除佔據整個畫面的巨大物件
+            // 排除佔據整個畫面的巨大物件
             const imgArea = canvas.width * canvas.height;
             if (comp.w > canvas.width * 0.85 || 
                 comp.h > canvas.height * 0.85 || 
                 comp.area > imgArea * MAX_AREA_RATE) {
                 continue;
+            }
+            
+            // 長寬比
+            if (comp.aspectRatio > 2.5 || comp.aspectRatio < 0.15) continue;
+            
+            // 填滿率
+            if (comp.solidity < 0.15) continue;
+            
+            // 邊緣過濾
+            const border = 10;
+            if (comp.x < border || comp.y < border || 
+                (comp.x + comp.w) > (canvas.width - border) || 
+                (comp.y + comp.h) > (canvas.height - border)) {
+                if (comp.area < 2000) continue;
             }
             
             filteredComponents.push(comp);
@@ -503,34 +560,26 @@ async function predict(isRealtime = false) {
         const details = [];
         const validBoxes = [];
         
-        // 7. 對每個區域進行辨識
+        // 對每個區域進行辨識
         for (const comp of filteredComponents) {
-            // 提取 ROI 數據
-            const roiData = {
-                data: new Uint8Array(comp.w * comp.h),
-                width: comp.w,
-                height: comp.h
-            };
-            
-            // 從二值化影像中提取 ROI
+            // 提取 ROI
+            const roiData = new Uint8ClampedArray(comp.w * comp.h);
             for (let y = 0; y < comp.h; y++) {
                 for (let x = 0; x < comp.w; x++) {
-                    const srcX = comp.x + x;
-                    const srcY = comp.y + y;
-                    const srcIdx = srcY * canvas.width + srcX;
+                    const srcIdx = (comp.y + y) * canvas.width + (comp.x + x);
                     const dstIdx = y * comp.w + x;
-                    roiData.data[dstIdx] = binaryImage.data[srcIdx];
+                    roiData[dstIdx] = binaryData[srcIdx];
                 }
             }
             
-            // 連體字切割邏輯 (移植自 p.py)
+            // 連體字切割邏輯
             if (comp.w > comp.h * 1.3) {
                 // 水平投影
                 const projection = new Array(comp.w).fill(0);
                 for (let x = 0; x < comp.w; x++) {
                     for (let y = 0; y < comp.h; y++) {
                         const idx = y * comp.w + x;
-                        if (roiData.data[idx] === 255) {
+                        if (roiData[idx] > 128) {
                             projection[x]++;
                         }
                     }
@@ -549,56 +598,43 @@ async function predict(isRealtime = false) {
                     }
                 }
                 
-                // 分割成兩個子區域
-                const subRegions = [
-                    { x: 0, w: splitX, h: comp.h },
-                    { x: splitX, w: comp.w - splitX, h: comp.h }
-                ];
+                // 分割並辨識
+                const subWidths = [splitX, comp.w - splitX];
+                let subX = 0;
                 
-                for (const subRegion of subRegions) {
-                    if (subRegion.w < 5) continue;
+                for (let i = 0; i < 2; i++) {
+                    if (subWidths[i] < 5) continue;
                     
                     // 提取子區域
-                    const subData = {
-                        data: new Uint8Array(subRegion.w * subRegion.h),
-                        width: subRegion.w,
-                        height: subRegion.h
-                    };
-                    
-                    for (let y = 0; y < subRegion.h; y++) {
-                        for (let x = 0; x < subRegion.w; x++) {
-                            const srcX = subRegion.x + x;
-                            const srcIdx = y * comp.w + srcX;
-                            const dstIdx = y * subRegion.w + x;
-                            subData.data[dstIdx] = roiData.data[srcIdx];
+                    const subData = new Uint8ClampedArray(subWidths[i] * comp.h);
+                    for (let y = 0; y < comp.h; y++) {
+                        for (let x = 0; x < subWidths[i]; x++) {
+                            const srcIdx = y * comp.w + (subX + x);
+                            const dstIdx = y * subWidths[i] + x;
+                            subData[dstIdx] = roiData[srcIdx];
                         }
                     }
                     
+                    subX += subWidths[i];
+                    
                     // 進階預處理
-                    const processedData = advancedPreprocess(subData);
+                    const processedSubData = advancedPreprocess(subData, subWidths[i], comp.h);
                     
-                    // 轉換為 Tensor 並預測
-                    const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
-                    const prediction = model.predict(tensor);
-                    const scores = await prediction.data();
-                    const digit = prediction.argMax(-1).dataSync()[0];
-                    const confidence = Math.max(...scores);
-                    
-                    tensor.dispose();
-                    prediction.dispose();
+                    // 使用模型預測
+                    const result = await predictWithModel(processedSubData);
                     
                     // 要求信心度 > 90%
-                    if (confidence > 0.90) {
-                        finalResult += digit.toString();
+                    if (result.confidence > 0.90) {
+                        finalResult += result.digit;
                         details.push({
-                            digit: digit,
-                            conf: `${(confidence * 100).toFixed(1)}%`
+                            digit: result.digit,
+                            conf: `${(result.confidence * 100).toFixed(1)}%`
                         });
                         validBoxes.push({
-                            x: comp.x + subRegion.x,
+                            x: comp.x + (i === 0 ? 0 : splitX),
                             y: comp.y,
-                            w: subRegion.w,
-                            h: subRegion.h
+                            w: subWidths[i],
+                            h: comp.h
                         });
                     }
                 }
@@ -606,29 +642,22 @@ async function predict(isRealtime = false) {
                 continue;
             }
             
-            // 一般數字預測
+            // 一般數字辨識
             // 進階預處理
-            const processedData = advancedPreprocess(roiData);
+            const processedData = advancedPreprocess(roiData, comp.w, comp.h);
             
-            // 轉換為 Tensor 並預測
-            const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
-            const prediction = model.predict(tensor);
-            const scores = await prediction.data();
-            const digit = prediction.argMax(-1).dataSync()[0];
-            const confidence = Math.max(...scores);
-            
-            tensor.dispose();
-            prediction.dispose();
+            // 使用模型預測
+            const result = await predictWithModel(processedData);
             
             // 信心度過濾 (即時模式要求 > 90%)
-            if (isRealtime && confidence < 0.90) {
+            if (isRealtime && result.confidence < 0.90) {
                 continue;
             }
             
-            finalResult += digit.toString();
+            finalResult += result.digit;
             details.push({
-                digit: digit,
-                conf: `${(confidence * 100).toFixed(1)}%`
+                digit: result.digit,
+                conf: `${(result.confidence * 100).toFixed(1)}%`
             });
             
             validBoxes.push({
@@ -639,7 +668,7 @@ async function predict(isRealtime = false) {
             });
         }
         
-        // 8. 更新顯示
+        // 更新顯示
         if (finalResult) {
             digitDisplay.innerText = finalResult;
             
@@ -649,135 +678,41 @@ async function predict(isRealtime = false) {
                 digitDisplay.style.transform = "scale(1)";
             }, 300);
             
-            // 視覺回饋
             addVisualFeedback("#2ecc71");
         } else {
             digitDisplay.innerText = "---";
-            if (isRealtime) {
-                confDetails.innerText = "等待有效數字入鏡...";
-            } else {
-                confDetails.innerText = "未偵測到有效數字";
-            }
+            confDetails.innerText = isRealtime ? "等待有效數字入鏡..." : "未偵測到有效數字";
         }
         
         updateDetails(details);
         
-        // 9. 如果是即時模式，畫出偵測框
+        // 如果是即時模式，畫出偵測框
         if (isRealtime && cameraStream && validBoxes.length > 0) {
-            // 清除畫布
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            // 重新繪製框框
             validBoxes.forEach((box, index) => {
-                // 畫綠色框框
                 ctx.strokeStyle = "#00FF00";
                 ctx.lineWidth = 3;
                 ctx.strokeRect(box.x, box.y, box.w, box.h);
                 
-                // 畫辨識到的數字
                 const detectedDigit = details[index] ? details[index].digit : "";
                 ctx.fillStyle = "#00FF00";
                 ctx.font = "bold 24px Arial";
                 ctx.fillText(detectedDigit.toString(), box.x, box.y - 5);
             });
             
-            // 恢復畫筆設定
             updatePen();
         }
         
         isProcessing = false;
-        return {
-            full_digit: finalResult,
-            details: details,
-            boxes: validBoxes
-        };
         
     } catch (error) {
         console.error("辨識錯誤:", error);
         digitDisplay.innerText = "❌";
-        confDetails.innerHTML = `<span style="color: #e74c3c">錯誤：${error.message}</span>`;
+        confDetails.innerText = `辨識錯誤: ${error.message}`;
         addVisualFeedback("#e74c3c");
         isProcessing = false;
-        return { error: error.message };
     }
-}
-
-// ==================== 模型加載函數 ====================
-async function loadModel() {
-    try {
-        confDetails.innerText = "🌌 正在啟動銀河辨識引擎...";
-        
-        // 設置 TensorFlow.js 後端
-        await tf.setBackend('cpu');
-        await tf.ready();
-        
-        console.log('TensorFlow.js 版本:', tf.version.tfjs);
-        console.log('使用後端:', tf.getBackend());
-        
-        // 創建一個簡單的 MNIST 模型
-        model = await createSimpleModel();
-        
-        console.log('✅ 模型創建成功！');
-        confDetails.innerText = "🚀 系統就緒，請開始書寫數字";
-        
-        return true;
-        
-    } catch (error) {
-        console.error('❌ 模型加載失敗:', error);
-        confDetails.innerHTML = `
-            <span style="color: #e74c3c">
-                ❌ 模型加載失敗<br>
-                <small>錯誤: ${error.message}</small>
-            </span>
-        `;
-        return false;
-    }
-}
-
-// ==================== 創建簡單的 MNIST 模型 ====================
-async function createSimpleModel() {
-    // 創建一個簡單的卷積神經網路
-    const model = tf.sequential();
-    
-    // 第一層卷積層
-    model.add(tf.layers.conv2d({
-        inputShape: [28, 28, 1],
-        filters: 8,
-        kernelSize: 3,
-        activation: 'relu'
-    }));
-    
-    model.add(tf.layers.maxPooling2d({ poolSize: 2 }));
-    
-    // 第二層卷積層
-    model.add(tf.layers.conv2d({
-        filters: 16,
-        kernelSize: 3,
-        activation: 'relu'
-    }));
-    
-    model.add(tf.layers.maxPooling2d({ poolSize: 2 }));
-    
-    // 展平層
-    model.add(tf.layers.flatten());
-    
-    // 全連接層
-    model.add(tf.layers.dense({ units: 32, activation: 'relu' }));
-    
-    // 輸出層
-    model.add(tf.layers.dense({ units: 10, activation: 'softmax' }));
-    
-    // 編譯模型
-    model.compile({
-        optimizer: tf.train.adam(),
-        loss: 'categoricalCrossentropy',
-        metrics: ['accuracy']
-    });
-    
-    // 輸出模型結構
-    model.summary();
-    
-    return model;
 }
 
 // ==================== UI 功能 ====================
@@ -883,27 +818,14 @@ function stopCamera() {
     video.style.display = "none";
     mainBox.classList.remove('cam-active');
     camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
-    init();
+    clearCanvas();
     addVisualFeedback("#34495e");
 }
 
 // ==================== 即時辨識函數 ====================
 async function predictRealtime() {
-    if (!model || isProcessing) return;
-    
-    try {
-        const result = await predict(true);
-        
-        // 更新顯示
-        if (result && result.full_digit) {
-            digitDisplay.innerText = result.full_digit;
-        }
-        
-        updateDetails(result ? result.details : []);
-        
-    } catch (err) {
-        console.log("即時辨識同步中...");
-    }
+    if (isProcessing || !model) return;
+    await predict(true);
 }
 
 // ==================== 檔案上傳功能 ====================
@@ -1145,15 +1067,13 @@ function setupEventListeners() {
     // 按鈕事件
     document.querySelector('.btn-run')?.addEventListener('click', () => predict());
     document.querySelector('.btn-clear')?.addEventListener('click', clearCanvas);
-    document.getElementById('eraserBtn')?.addEventListener('click', toggleEraser);
-    document.getElementById('camToggleBtn')?.addEventListener('click', toggleCamera);
-    document.getElementById('voiceBtn')?.addEventListener('click', toggleVoice);
+    eraserBtn.addEventListener('click', toggleEraser);
+    camToggleBtn.addEventListener('click', toggleCamera);
+    voiceBtn.addEventListener('click', toggleVoice);
     document.querySelector('.btn-upload')?.addEventListener('click', triggerFile);
     
     // 檔案上傳事件
-    if (fileInput) {
-        fileInput.addEventListener('change', handleFile);
-    }
+    fileInput.addEventListener('change', handleFile);
 }
 
 // ==================== 頁面載入初始化 ====================
@@ -1163,18 +1083,25 @@ document.addEventListener('DOMContentLoaded', () => {
     init();
 });
 
-// ==================== 錯誤處理 ====================
-window.addEventListener('error', function(e) {
-    console.error('全局錯誤:', e.error);
-    if (confDetails) {
-        confDetails.innerHTML = `<span style="color: #e74c3c">系統錯誤: ${e.message}</span>`;
+// ==================== TensorFlow.js 內存管理 ====================
+setInterval(() => {
+    try {
+        const memoryInfo = tf.memory();
+        if (memoryInfo.numTensors > 100) {
+            console.warn(`TensorFlow.js 內存警告: ${memoryInfo.numTensors} 個張量`);
+            // 強制垃圾回收（在某些瀏覽器中有效）
+            if (typeof gc === 'function') {
+                gc();
+            }
+        }
+    } catch (e) {
+        // 忽略內存檢查錯誤
     }
-});
+}, 30000);
 
-// 導出函數供全局使用
+// 導出函數供調試
 window.predict = predict;
 window.clearCanvas = clearCanvas;
 window.toggleCamera = toggleCamera;
 window.toggleEraser = toggleEraser;
 window.toggleVoice = toggleVoice;
-window.triggerFile = triggerFile;
