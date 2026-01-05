@@ -2,6 +2,7 @@
  * 🌌 銀河手寫數字辨識系統 - 完整修復版
  * 修復了 WebGL 錯誤和語音識別重複啟動問題
  * 完全前端運行，無需後端伺服器
+ * 修改：鏡頭辨識需信心度90%才顯示，語音辨識結果顯示在輸出格
  */
 
 // ==================== 全局變量初始化 ====================
@@ -724,7 +725,8 @@ async function predict(isRealtime = false) {
                     tensor.dispose();
                     prediction.dispose();
                     
-                    if (confidence > 0.8) {
+                    // 修改：連體字也要求信心度 > 90%
+                    if (confidence > 0.9) {
                         finalResult += digit.toString();
                         details.push({
                             digit: digit,
@@ -750,8 +752,13 @@ async function predict(isRealtime = false) {
             tensor.dispose();
             prediction.dispose();
             
-            // 信心度過濾 (即時模式提高要求)
-            if (isRealtime && confidence < 0.85) {
+            // 修改：信心度過濾 (即時模式要求 > 90%)
+            if (isRealtime && confidence < 0.90) {
+                continue;
+            }
+            
+            // 非即時模式也要求信心度 > 80%
+            if (!isRealtime && confidence < 0.80) {
                 continue;
             }
             
@@ -784,7 +791,7 @@ async function predict(isRealtime = false) {
         } else {
             digitDisplay.innerText = "---";
             if (isRealtime) {
-                confDetails.innerText = "正在尋找數字...";
+                confDetails.innerText = "等待有效數字入鏡 (信心度需>90%)...";
             } else {
                 confDetails.innerText = "未偵測到有效數字";
             }
@@ -792,12 +799,12 @@ async function predict(isRealtime = false) {
         
         updateDetails(details);
         
-        // 9. 如果是即時模式，畫出偵測框
-        if (isRealtime && cameraStream && validBoxes.length > 0) {
+        // 9. 如果是即時模式，畫出偵測框 (只顯示信心度>90%的)
+        if (isRealtime && cameraStream) {
             // 清除畫布（只清除框框區域）
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            // 重新繪製框框
+            // 重新繪製框框 (只繪製信心度>90%的)
             validBoxes.forEach((box, index) => {
                 // 畫綠色框框
                 ctx.strokeStyle = "#00FF00";
@@ -1115,21 +1122,25 @@ function initSpeechRecognition() {
         // 重置重試計數
         retryCount = 0;
         
+        // 修改：將所有語音辨識結果顯示在輸出格
+        digitDisplay.innerText = transcript;
+        
         if (transcript.includes('清除') || transcript.includes('清空')) {
             clearCanvas();
+            confDetails.innerHTML = `<b>語音指令：</b><span style="color:#ff6b9d">已執行清除指令</span>`;
         } else if (transcript.includes('開始') || transcript.includes('辨識')) {
             predict(false);
+            confDetails.innerHTML = `<b>語音指令：</b><span style="color:#ff6b9d">已開始辨識</span>`;
         } else if (transcript.includes('鏡頭') || transcript.includes('相機')) {
             toggleCamera();
+            confDetails.innerHTML = `<b>語音指令：</b><span style="color:#ff6b9d">已切換相機</span>`;
         } else if (transcript.includes('橡皮擦')) {
             toggleEraser();
-        } else if (/^\d+$/.test(transcript)) {
-            digitDisplay.innerText = transcript;
+            confDetails.innerHTML = `<b>語音指令：</b><span style="color:#ff6b9d">已切換橡皮擦模式</span>`;
+        } else {
+            // 其他語音內容直接顯示在輸出格和詳細資訊
             confDetails.innerHTML = `<b>語音輸入：</b><span style="color:#ff6b9d">${transcript}</span>`;
             addVisualFeedback("#ff6b9d");
-        } else {
-            // 顯示其他語音指令
-            confDetails.innerHTML = `<b>語音指令：</b><span style="color:#ff6b9d">${transcript}</span>`;
         }
     };
     
