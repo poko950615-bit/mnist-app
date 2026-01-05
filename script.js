@@ -1,9 +1,10 @@
 /**
- * 🌌 銀河手寫數字辨識系統 - 最佳修正版
- * 修正項目：
- * 1. 繪圖異常連線與座標偏移
- * 2. 檔案上傳需觸發兩次之 Bug
- * 3. 鏡頭與語音開關的狀態鎖定與資源釋放
+ * 🌌 銀河手寫數字辨識系統 - 終極相機強化版
+ * * 修改重點：
+ * 1. [相機核心] 導入 ROI (Region of Interest) 掃描框技術，徹底排除環境背景干擾。
+ * 2. [相機核心] 提升辨識頻率至 100ms (極速響應)。
+ * 3. [相機核心] 加入「結果穩定器」，防止數字跳動。
+ * 4. [修復] 保留了之前的繪圖斷線修復與上傳 Bug 修復。
  */
 
 // ==================== 全局變量初始化 ====================
@@ -22,10 +23,18 @@ let realtimeInterval = null;
 let recognition = null;
 let isVoiceActive = false;
 let isProcessing = false;
+
+// 繪圖座標記錄
 let lastX = 0;
 let lastY = 0;
 
-// ==================== Keras v3 兼容性修復 (保留原邏輯) ====================
+// 相機模式專用變數
+let lastPredicationTime = 0;
+const PREDICTION_INTERVAL = 100; // 100ms 極速辨識
+const STABILITY_THRESHOLD = 2;   // 連續偵測到 2 次才顯示（防閃爍）
+let predictionHistory = [];      // 辨識結果歷史紀錄
+
+// ==================== Keras v3 兼容性修復 ====================
 class PatchModelLoader {
     constructor(url) { 
         this.url = url;
@@ -43,7 +52,6 @@ class PatchModelLoader {
                 if (obj.class_name === 'InputLayer' && obj.config) {
                     const cfg = obj.config;
                     if (!cfg.batchInputShape && !cfg.batch_input_shape) {
-                        console.log('修復 InputLayer 形狀');
                         cfg.batchInputShape = [null, 28, 28, 1];
                     }
                 }
@@ -65,8 +73,6 @@ class PatchModelLoader {
                     }
                 });
             }
-            
-            console.log('模型加載成功');
             return artifacts;
         } catch (error) {
             console.error('PatchModelLoader 錯誤:', error);
@@ -102,9 +108,7 @@ async function loadModel() {
             const tempCanvas = document.createElement('canvas');
             const gl = tempCanvas.getContext('webgl2') || tempCanvas.getContext('webgl');
             if (gl) backendToUse = 'webgl';
-        } catch (e) {
-            console.log('WebGL 不可用');
-        }
+        } catch (e) { console.log('WebGL 不可用'); }
         
         await tf.setBackend(backendToUse);
         await tf.ready();
@@ -128,7 +132,7 @@ async function loadModel() {
     }
 }
 
-// ==================== 影像處理函數 (保留原始演算法) ====================
+// ==================== 影像處理核心 (保持原算法) ====================
 function imageDataToGrayArray(imageData) {
     const { width, height, data } = imageData;
     const grayArray = new Uint8Array(width * height);
@@ -255,6 +259,7 @@ function advancedPreprocess(roiImage) {
     const binaryArray = new Uint8Array(width * height);
     for (let i = 0; i < data.length; i++) binaryArray[i] = data[i] > 128 ? 255 : 0;
     
+    // 膨脹處理，增強筆畫連通性
     const dilated = new Uint8Array(width * height);
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
@@ -269,6 +274,7 @@ function advancedPreprocess(roiImage) {
         }
     }
     
+    // Padding
     const pad = Math.floor(Math.max(height, width) * 0.45);
     const pw = width + 2 * pad, ph = height + 2 * pad;
     const paddedData = new Uint8Array(pw * ph);
@@ -276,12 +282,14 @@ function advancedPreprocess(roiImage) {
         for (let x = 0; x < width; x++) paddedData[(y + pad) * pw + (x + pad)] = dilated[y * width + x];
     }
     
+    // 縮放到 28x28
     const targetSize = 28;
     const scaledData = new Uint8Array(targetSize * targetSize);
     for (let y = 0; y < targetSize; y++) {
         for (let x = 0; x < targetSize; x++) scaledData[y * targetSize + x] = paddedData[Math.floor(y * (ph / targetSize)) * pw + Math.floor(x * (pw / targetSize))];
     }
     
+    // 質心校正 (Centering)
     const moments = calculateImageMoments({ data: scaledData, width: targetSize, height: targetSize });
     const finalData = new Float32Array(targetSize * targetSize);
     if (moments.m00 !== 0) {
@@ -298,47 +306,149 @@ function advancedPreprocess(roiImage) {
     return finalData;
 }
 
-// ==================== 主辨識函數 (保留原始邏輯) ====================
+// ==================== [核心修改] 辨識與預測函數 ====================
+
+// 輔助：繪製 ROI 掃描框
+function drawROIGuide(ctx, width, height, roi) {
+    // 1. 整個畫面變暗 (半透明黑)
+    ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+    ctx.fillRect(0, 0, width, height);
+
+    // 2. 挖出中間的洞 (清除半透明層)
+    ctx.clearRect(roi.x, roi.y, roi.w, roi.h);
+
+    // 3. 畫綠色掃描框
+    ctx.strokeStyle = "#00FF00";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+
+    // 4. 文字提示
+    ctx.fillStyle = "#00FF00";
+    ctx.font = "bold 20px Arial";
+    ctx.fillText("請將數字置於框內", roi.x + 20, roi.y - 15);
+}
+
+// 主辨識函數
 async function predict(isRealtime = false) {
     if (isProcessing || !model) return;
+    
+    // 頻率限制 (僅針對 Realtime 模式)
+    const now = Date.now();
+    if (isRealtime && (now - lastPredicationTime < PREDICTION_INTERVAL)) return;
+    lastPredicationTime = now;
+
     isProcessing = true;
     try {
-        if (!isRealtime) {
-            digitDisplay.innerHTML = '<span class="pulse-icon">🌠</span>';
-            confDetails.innerText = "正在分析影像...";
-        }
-        
+        // --- 準備畫布 ---
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = canvas.width; tempCanvas.height = canvas.height;
         const tempCtx = tempCanvas.getContext('2d');
-        if (cameraStream) tempCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        tempCtx.drawImage(canvas, 0, 0);
-        
-        const imageData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
+
+        // 定義掃描框 (ROI) - 畫布中心 300x300 的區域
+        const roiSize = 300;
+        const roi = {
+            x: (canvas.width - roiSize) / 2,
+            y: (canvas.height - roiSize) / 2,
+            w: roiSize,
+            h: roiSize
+        };
+
+        if (cameraStream && isRealtime) {
+            // 繪製相機影像
+            tempCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            // 繪製綠色掃描框 UI 供使用者參考 (注意：這是畫在記憶體中的 canvas，不會影響辨識，但我們需要同步更新到主畫布給使用者看)
+            const mainCtx = canvas.getContext('2d');
+            mainCtx.clearRect(0, 0, canvas.width, canvas.height);
+            mainCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            drawROIGuide(mainCtx, canvas.width, canvas.height, roi);
+        } else {
+            // 一般手寫模式，讀取整個畫布
+            tempCtx.drawImage(canvas, 0, 0);
+        }
+
+        // --- 擷取影像資料 ---
+        // 關鍵修改：如果是即時模式，只擷取 ROI 區域的像素！完全排除外部環境
+        let imageData;
+        if (isRealtime) {
+            imageData = tempCtx.getImageData(roi.x, roi.y, roi.w, roi.h);
+        } else {
+            imageData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
+        }
+
+        // --- 影像預處理 pipeline ---
         const grayImage = imageDataToGrayArray(imageData);
         const avgBrightness = calculateAverageBrightness(grayImage);
-        const processedGray = avgBrightness > 120 ? invertBackground(grayImage) : grayImage;
+        
+        // 自動判斷是否反轉 (紙張通常是白底黑字，模型需要黑底白字)
+        const processedGray = avgBrightness > 100 ? invertBackground(grayImage) : grayImage;
         const blurred = simpleGaussianBlur(processedGray);
-        const binaryImage = binarizeImage(blurred, calculateOtsuThreshold(blurred));
+        const threshold = calculateOtsuThreshold(blurred);
+        const binaryImage = binarizeImage(blurred, threshold);
+
+        // --- [相機模式專用] 雜訊過濾 ---
+        if (isRealtime) {
+            // 計算白色像素比例
+            let whiteCount = 0;
+            for(let i=0; i<binaryImage.data.length; i++) if(binaryImage.data[i] === 255) whiteCount++;
+            const whiteRatio = whiteCount / binaryImage.data.length;
+
+            // 如果畫面太乾淨(全黑)或太雜亂(全白)，直接放棄
+            if (whiteRatio < 0.01 || whiteRatio > 0.4) {
+                digitDisplay.innerText = "---";
+                predictionHistory = []; // 重置歷史
+                isProcessing = false;
+                return;
+            }
+        }
+
+        // --- 連通域分析 ---
         const components = findConnectedComponents(binaryImage);
         
-        const MIN_AREA = isRealtime ? 500 : 150;
-        const filtered = components.filter(c => c.area >= MIN_AREA && c.aspectRatio <= 2.5 && c.aspectRatio >= 0.15 && c.solidity >= 0.15);
-        filtered.sort((a, b) => a.x - b.x);
-        
+        // 過濾邏輯
+        const MIN_AREA = isRealtime ? 300 : 150; // 相機模式需要更大的有效面積
+        const filtered = components.filter(c => {
+            // 1. 面積檢查
+            if (c.area < MIN_AREA) return false;
+            // 2. 形狀檢查 (數字不會太扁長)
+            if (c.aspectRatio > 3.0 || c.aspectRatio < 0.15) return false;
+            // 3. 實心度檢查
+            if (c.solidity < 0.12) return false;
+
+            // 4. [相機模式] 邊緣接觸檢查
+            // 如果物件碰到 ROI 的邊框，代表數字沒拍完整，忽略
+            if (isRealtime) {
+                const border = 5;
+                if (c.x < border || c.y < border || 
+                   (c.x + c.w) > (imageData.width - border) || 
+                   (c.y + c.h) > (imageData.height - border)) {
+                    return false;
+                }
+            }
+            return true;
+        });
+
+        // 排序：相機模式只取最大的那個(假設使用者會把數字放中間)，手寫模式取左到右
+        if (isRealtime) {
+            filtered.sort((a, b) => b.area - a.area);
+            // 只留最大的一個
+            if (filtered.length > 1) filtered.length = 1;
+        } else {
+            filtered.sort((a, b) => a.x - b.x);
+        }
+
         let finalResult = "";
         const details = [];
-        const validBoxes = [];
 
+        // --- 開始辨識 ---
         for (const comp of filtered) {
             const roiData = { data: new Uint8Array(comp.w * comp.h), width: comp.w, height: comp.h };
             for (let y = 0; y < comp.h; y++) {
-                for (let x = 0; x < comp.w; x++) roiData.data[y * comp.w + x] = binaryImage.data[(comp.y + y) * canvas.width + (comp.x + x)];
+                for (let x = 0; x < comp.w; x++) {
+                    // 注意：這裡的 binaryImage 座標已經是相對 ROI 的
+                    roiData.data[y * comp.w + x] = binaryImage.data[(comp.y + y) * binaryImage.width + (comp.x + x)];
+                }
             }
 
-            // 連體字切割與預測 (這裡保留您的原始邏輯結構，為節省篇幅直接調用 advancedPreprocess)
-            // 若您的原始代碼有特殊的連體字切割邏輯，這裡完全兼容，因為我們只改動了 UI 和 輸入部分
-            
             const processedData = advancedPreprocess(roiData);
             const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
             const prediction = model.predict(tensor);
@@ -347,36 +457,61 @@ async function predict(isRealtime = false) {
             const confidence = Math.max(...scores);
             tensor.dispose(); prediction.dispose();
 
-            if (confidence > (isRealtime ? 0.85 : 0.7)) {
+            // [相機模式] 極高信心度門檻，排除雜訊
+            const CONF_THRESHOLD = isRealtime ? 0.95 : 0.7;
+
+            if (confidence > CONF_THRESHOLD) {
                 finalResult += digit.toString();
                 details.push({ digit, conf: `${(confidence * 100).toFixed(1)}%` });
-                validBoxes.push(comp);
             }
         }
 
+        // --- 結果處理與穩定顯示 ---
         if (finalResult) {
-            digitDisplay.innerText = finalResult;
-            digitDisplay.style.transform = "scale(1.2)";
-            setTimeout(() => { digitDisplay.style.transform = "scale(1)"; }, 300);
-            addVisualFeedback("#2ecc71");
+            if (isRealtime) {
+                // 穩定器邏輯：連續 N 次看到一樣的數字才顯示
+                predictionHistory.push(finalResult);
+                if (predictionHistory.length > STABILITY_THRESHOLD) predictionHistory.shift();
+                
+                // 檢查歷史紀錄是否都一樣
+                const allSame = predictionHistory.every(v => v === finalResult);
+                
+                if (allSame && predictionHistory.length === STABILITY_THRESHOLD) {
+                    digitDisplay.innerText = finalResult;
+                    addVisualFeedback("#2ecc71");
+                    confDetails.innerText = `相機鎖定: ${details[0].digit} (${details[0].conf})`;
+                    
+                    // 在相機畫面上標示出偵測到的框 (相對於 ROI)
+                    const mainCtx = canvas.getContext('2d');
+                    const comp = filtered[0];
+                    if (comp) {
+                        mainCtx.strokeStyle = "#FFFF00";
+                        mainCtx.lineWidth = 3;
+                        // 還原回主畫布座標：ROI起始 + 組件偏移
+                        mainCtx.strokeRect(roi.x + comp.x, roi.y + comp.y, comp.w, comp.h);
+                    }
+                }
+            } else {
+                // 手寫模式直接顯示
+                digitDisplay.innerText = finalResult;
+                updateDetails(details);
+                addVisualFeedback("#2ecc71");
+            }
         } else {
-            digitDisplay.innerText = "---";
-            confDetails.innerText = isRealtime ? "正在尋找數字..." : "未偵測到有效數字";
+            // 沒辨識到
+            if (isRealtime) {
+                 predictionHistory = []; // 斷掉連續紀錄
+                 digitDisplay.innerText = "---";
+                 confDetails.innerText = "正在掃描...";
+            } else {
+                digitDisplay.innerText = "---";
+                confDetails.innerText = "未偵測到有效數字";
+            }
         }
-        updateDetails(details);
 
-        if (isRealtime && cameraStream && validBoxes.length > 0) {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            validBoxes.forEach((box, i) => {
-                ctx.strokeStyle = "#00FF00"; ctx.lineWidth = 3;
-                ctx.strokeRect(box.x, box.y, box.w, box.h);
-                ctx.fillStyle = "#00FF00"; ctx.font = "bold 24px Arial";
-                ctx.fillText(details[i].digit.toString(), box.x, box.y - 5);
-            });
-            updatePen();
-        }
         isProcessing = false;
-        return { full_digit: finalResult, details, boxes: validBoxes };
+        return { full_digit: finalResult };
+
     } catch (error) {
         console.error("辨識錯誤:", error);
         isProcessing = false;
@@ -384,7 +519,7 @@ async function predict(isRealtime = false) {
     }
 }
 
-// ==================== UI 功能修正 (重點修正區域) ====================
+// ==================== UI 與工具功能 ====================
 
 function updatePen() {
     ctx.lineCap = 'round';
@@ -410,37 +545,44 @@ function toggleEraser() {
 }
 
 function clearCanvas() {
+    // 只有在非相機模式下才清除顯示
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (!cameraStream) {
         ctx.fillStyle = "black";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
+        digitDisplay.innerText = "---";
+        confDetails.innerText = "🪐 畫布已清空，請重新書寫";
     }
-    digitDisplay.innerText = "---";
-    confDetails.innerText = "🪐 畫布已清空，請重新書寫";
     addVisualFeedback("#2ecc71");
     addGalaxyEffects();
 }
 
-// [修正] 相機開關邏輯：確保關閉時清除計時器與恢復 UI
+// [修正] 相機開關邏輯
 async function toggleCamera() {
     if (cameraStream) {
         stopCamera();
     } else {
         try {
+            // 請求高清串流以利辨識
             cameraStream = await navigator.mediaDevices.getUserMedia({
                 video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
                 audio: false
             });
             video.srcObject = cameraStream;
-            video.style.display = "block";
+            video.play(); // 確保影片播放
+            video.style.display = "block"; // 隱藏原生 video 元素，我們畫在 canvas 上
+            video.style.opacity = "0";     // 但保持它運作
+
             document.getElementById('mainBox').classList.add('cam-active');
             
             const btn = document.getElementById('camToggleBtn');
             if(btn) btn.innerHTML = '<span class="btn-icon">📷</span> 關閉鏡頭';
             
-            realtimeInterval = setInterval(() => predict(true), 800);
-            clearCanvas();
+            // 使用更頻繁的 Loop 進行即時辨識 (100ms 一次)
+            realtimeInterval = setInterval(() => predict(true), PREDICTION_INTERVAL);
+            
             addVisualFeedback("#9b59b6");
+            confDetails.innerText = "📷 相機已啟動，請將數字對準綠框";
         } catch (err) {
             alert("無法啟動鏡頭：請確保已授予相機權限");
             console.error(err);
@@ -457,16 +599,18 @@ function stopCamera() {
         clearInterval(realtimeInterval); 
         realtimeInterval = null; 
     }
+    
+    // 恢復 UI 狀態
     video.style.display = "none";
     document.getElementById('mainBox').classList.remove('cam-active');
     
     const btn = document.getElementById('camToggleBtn');
     if(btn) btn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
     
-    init(); // 恢復黑底畫布
+    init(); // 恢復黑底畫布供手寫
 }
 
-// [修正] 檔案上傳 Bug：處理完畢後清空 value
+// [修正] 檔案上傳
 function triggerFile() {
     document.getElementById('fileInput').click();
 }
@@ -486,7 +630,7 @@ function handleFile(event) {
             ctx.drawImage(img, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
             predict(false);
             
-            // [關鍵修正] 清空 input，確保下次選同一張圖也能觸發
+            // [關鍵修正] 清空 input value，確保可重複上傳
             event.target.value = ""; 
         };
         img.src = e.target.result;
@@ -494,7 +638,7 @@ function handleFile(event) {
     reader.readAsDataURL(file);
 }
 
-// ==================== 語音功能優化 (修正重複啟動與報錯) ====================
+// ==================== 語音功能 ====================
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) return;
@@ -514,11 +658,10 @@ function initSpeechRecognition() {
     };
     
     recognition.onend = () => {
-        // [安全機制] 避免在結束時過快重啟導致的報錯
         if (isVoiceActive) {
             setTimeout(() => { 
                 if (isVoiceActive && recognition) {
-                    try { recognition.start(); } catch(e) { console.log('語音重啟忽略', e); }
+                    try { recognition.start(); } catch(e) {}
                 } 
             }, 1000);
         } else {
@@ -556,27 +699,26 @@ function updateVoiceButton() {
     btn.classList.toggle('voice-active', isVoiceActive);
 }
 
-// ==================== 繪圖事件修正 (解決左下角連線 Bug) ====================
-
-// [修正] 取得正確座標：考慮 CSS 縮放帶來的影響
+// ==================== [修正] 繪圖事件 (解決起點連線問題) ====================
 function getCanvasCoordinates(e) {
     const rect = canvas.getBoundingClientRect();
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
     
-    // 計算 Canvas 實際解析度與顯示大小的比例
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    
     return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
 }
 
 function startDrawing(e) {
+    // 若在相機模式，禁止繪圖以免干擾
+    if (cameraStream) return;
+
     e.preventDefault();
     const { x, y } = getCanvasCoordinates(e);
     isDrawing = true;
     
-    // [關鍵修正] 每次下筆前重置路徑並移動到起點，防止連回原點(0,0)
+    // [關鍵] 斷開與原點的連結
     ctx.beginPath();
     ctx.moveTo(x, y);
     
@@ -592,7 +734,7 @@ function draw(e) {
     ctx.lineTo(x, y);
     ctx.stroke();
     
-    // 透過連續的 beginPath/moveTo 保持線條平滑且獨立
+    // 保持連續性
     ctx.beginPath();
     ctx.moveTo(x, y);
     
@@ -603,24 +745,22 @@ function draw(e) {
 function stopDrawing() {
     if (isDrawing) {
         isDrawing = false;
-        ctx.closePath(); // 結束當前路徑
-        // 若非即時模式，畫完後延遲自動辨識
+        ctx.closePath();
+        // 手寫模式下，畫完稍微延遲後自動辨識
         if (!cameraStream) setTimeout(() => predict(false), 300);
     }
 }
 
-// ==================== 初始化綁定 ====================
+// ==================== 事件綁定與初始化 ====================
 function setupEventListeners() {
-    // 支援滑鼠與觸控的統一監聽
     canvas.addEventListener('mousedown', startDrawing);
     canvas.addEventListener('mousemove', draw);
-    window.addEventListener('mouseup', stopDrawing); // 使用 window 避免滑出畫布後卡住
+    window.addEventListener('mouseup', stopDrawing);
     
     canvas.addEventListener('touchstart', startDrawing, { passive: false });
     canvas.addEventListener('touchmove', draw, { passive: false });
     canvas.addEventListener('touchend', stopDrawing);
 
-    // 按鈕事件綁定
     document.querySelector('.btn-run')?.addEventListener('click', () => predict(false));
     document.querySelector('.btn-clear')?.addEventListener('click', clearCanvas);
     document.getElementById('eraserBtn')?.addEventListener('click', toggleEraser);
@@ -640,7 +780,6 @@ function addVisualFeedback(color) {
 }
 
 function addGalaxyEffects() {
-    // 保持原始視覺效果
     ctx.fillStyle = "rgba(163, 217, 255, 0.3)";
     ctx.beginPath(); ctx.arc(650, 20, 2, 0, Math.PI*2); ctx.fill();
     updatePen();
@@ -655,7 +794,6 @@ function updateDetails(data) {
     confDetails.innerHTML = html;
 }
 
-// 啟動點
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     init();
