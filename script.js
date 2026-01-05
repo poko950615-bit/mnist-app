@@ -22,11 +22,6 @@ let isVoiceActive = false;
 let isProcessing = false;
 let lastX = 0;
 let lastY = 0;
-let cameraRAF = null;
-let lastStableDigit = "";
-let stableCount = 0;
-const STABLE_REQUIRED = 3;
-
 
 // ==================== Keras v3 兼容性修復 ====================
 class PatchModelLoader {
@@ -565,169 +560,277 @@ function advancedPreprocess(roiImage) {
 
 // ==================== 主辨識函數 ====================
 async function predict(isRealtime = false) {
+    // 防止重複處理
     if (isProcessing || !model) return;
     isProcessing = true;
-
+    
     try {
+        // 顯示載入狀態
         if (!isRealtime) {
             digitDisplay.innerHTML = '<span class="pulse-icon">🌠</span>';
             confDetails.innerText = "正在分析影像...";
         }
-
-        // 建立臨時畫布
+        
+        // 獲取畫布影像
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = canvas.width;
         tempCanvas.height = canvas.height;
         const tempCtx = tempCanvas.getContext('2d');
-
+        
+        // 如果有相機串流，先繪製相機影像
         if (cameraStream) {
             tempCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
         }
+        // 繪製手寫畫布
         tempCtx.drawImage(canvas, 0, 0);
-
+        
+        // 獲取影像數據
         const imageData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
+        
+        // 1. 轉為灰階
         const grayImage = imageDataToGrayArray(imageData);
-
-        // 背景反轉檢測
+        
+        // 2. 背景反轉檢測
         const avgBrightness = calculateAverageBrightness(grayImage);
-        const processedGray = avgBrightness > 120 ? invertBackground(grayImage) : grayImage;
-
+        let processedGray = grayImage;
+        
+        if (avgBrightness > 120) {
+            processedGray = invertBackground(grayImage);
+        }
+        
+        // 3. 高斯模糊 (去噪)
         const blurred = simpleGaussianBlur(processedGray);
+        
+        // 4. Otsu 二值化
         const otsuThreshold = calculateOtsuThreshold(blurred);
         const binaryImage = binarizeImage(blurred, otsuThreshold);
-
-        // 連通域分析
+        
+        // 5. 連通域分析
         const components = findConnectedComponents(binaryImage);
-
-        // 過濾連通域：只保留面積最大的一個（假設是手上數字）
+        
+        // 6. 過濾連通域 (完全移植自 p.py 的過濾邏輯)
         const MIN_AREA = isRealtime ? 500 : 150;
-        const validComponents = components
-            .filter(c => c.area >= MIN_AREA && c.aspectRatio < 2.5 && c.aspectRatio > 0.15 && c.solidity >= 0.15)
-            .sort((a, b) => b.area - a.area);
-
-        if (validComponents.length === 0) {
+        const filteredComponents = [];
+        
+        for (const comp of components) {
+            // 1. 面積過小則視為雜訊
+            if (comp.area < MIN_AREA) continue;
+            
+            // 2. 排除過於細長或寬大的線條
+            if (comp.aspectRatio > 2.5 || comp.aspectRatio < 0.15) continue;
+            
+            // 3. Solidity (填滿率) 檢查
+            if (comp.solidity < 0.15) continue;
+            
+            // 4. 邊緣無效區過濾
+            const border = 8;
+            if (comp.x < border || comp.y < border || 
+                (comp.x + comp.w) > (canvas.width - border) || 
+                (comp.y + comp.h) > (canvas.height - border)) {
+                if (comp.area < 1000) continue;
+            }
+            
+            filteredComponents.push(comp);
+        }
+        
+        // 排序 (由左至右)
+        filteredComponents.sort((a, b) => a.x - b.x);
+        
+        let finalResult = "";
+        const details = [];
+        const validBoxes = [];
+        
+        // 7. 對每個區域進行辨識
+        for (const comp of filteredComponents) {
+            // 提取 ROI 數據
+            const roiData = {
+                data: new Uint8Array(comp.w * comp.h),
+                width: comp.w,
+                height: comp.h
+            };
+            
+            // 從二值化影像中提取 ROI
+            for (let y = 0; y < comp.h; y++) {
+                for (let x = 0; x < comp.w; x++) {
+                    const srcX = comp.x + x;
+                    const srcY = comp.y + y;
+                    const srcIdx = srcY * canvas.width + srcX;
+                    const dstIdx = y * comp.w + x;
+                    roiData.data[dstIdx] = binaryImage.data[srcIdx];
+                }
+            }
+            
+            // 連體字切割邏輯 (完全移植自 p.py)
+            if (comp.w > comp.h * 1.3) {
+                // 水平投影
+                const projection = new Array(comp.w).fill(0);
+                for (let x = 0; x < comp.w; x++) {
+                    for (let y = 0; y < comp.h; y++) {
+                        const idx = y * comp.w + x;
+                        if (roiData.data[idx] === 255) {
+                            projection[x]++;
+                        }
+                    }
+                }
+                
+                // 找到分割點 (在寬度的 30%-70% 之間尋找最小值)
+                const start = Math.floor(comp.w * 0.3);
+                const end = Math.floor(comp.w * 0.7);
+                let minVal = comp.h + 1;
+                let splitX = start;
+                
+                for (let x = start; x < end; x++) {
+                    if (projection[x] < minVal) {
+                        minVal = projection[x];
+                        splitX = x;
+                    }
+                }
+                
+                // 分割成兩個子區域
+                const subRegions = [
+                    { x: 0, w: splitX, h: comp.h },
+                    { x: splitX, w: comp.w - splitX, h: comp.h }
+                ];
+                
+                for (const subRegion of subRegions) {
+                    if (subRegion.w < 5) continue;
+                    
+                    // 提取子區域
+                    const subData = {
+                        data: new Uint8Array(subRegion.w * subRegion.h),
+                        width: subRegion.w,
+                        height: subRegion.h
+                    };
+                    
+                    for (let y = 0; y < subRegion.h; y++) {
+                        for (let x = 0; x < subRegion.w; x++) {
+                            const srcX = subRegion.x + x;
+                            const srcIdx = y * comp.w + srcX;
+                            const dstIdx = y * subRegion.w + x;
+                            subData.data[dstIdx] = roiData.data[srcIdx];
+                        }
+                    }
+                    
+                    // 進階預處理
+                    const processedData = advancedPreprocess(subData);
+                    
+                    // 轉換為 Tensor 並預測
+                    const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
+                    const prediction = model.predict(tensor);
+                    const scores = await prediction.data();
+                    const digit = prediction.argMax(-1).dataSync()[0];
+                    const confidence = Math.max(...scores);
+                    
+                    tensor.dispose();
+                    prediction.dispose();
+                    
+                    if (confidence > 0.8) {
+                        finalResult += digit.toString();
+                        details.push({
+                            digit: digit,
+                            conf: `${(confidence * 100).toFixed(1)}%`
+                        });
+                    }
+                }
+                
+                continue;
+            }
+            
+            // 一般數字預測
+            // 進階預處理
+            const processedData = advancedPreprocess(roiData);
+            
+            // 轉換為 Tensor 並預測
+            const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
+            const prediction = model.predict(tensor);
+            const scores = await prediction.data();
+            const digit = prediction.argMax(-1).dataSync()[0];
+            const confidence = Math.max(...scores);
+            
+            tensor.dispose();
+            prediction.dispose();
+            
+            // 信心度過濾 (即時模式提高要求)
+            if (isRealtime && confidence < 0.85) {
+                continue;
+            }
+            
+            finalResult += digit.toString();
+            details.push({
+                digit: digit,
+                conf: `${(confidence * 100).toFixed(1)}%`
+            });
+            
+            validBoxes.push({
+                x: comp.x,
+                y: comp.y,
+                w: comp.w,
+                h: comp.h
+            });
+        }
+        
+        // 8. 更新顯示
+        if (finalResult) {
+            digitDisplay.innerText = finalResult;
+            
+            // 添加動畫效果
+            digitDisplay.style.transform = "scale(1.2)";
+            setTimeout(() => {
+                digitDisplay.style.transform = "scale(1)";
+            }, 300);
+            
+            // 視覺回饋
+            addVisualFeedback("#2ecc71");
+        } else {
+            digitDisplay.innerText = "---";
             if (isRealtime) {
                 confDetails.innerText = "正在尋找數字...";
             } else {
                 confDetails.innerText = "未偵測到有效數字";
             }
-            isProcessing = false;
-            return { full_digit: "", details: [], boxes: [] };
         }
-
-        // 只取最大區域
-        const comp = validComponents[0];
-
-        // 提取 ROI
-        const roiData = {
-            data: new Uint8Array(comp.w * comp.h),
-            width: comp.w,
-            height: comp.h
-        };
-        for (let y = 0; y < comp.h; y++) {
-            for (let x = 0; x < comp.w; x++) {
-                roiData.data[y * comp.w + x] = binaryImage.data[(comp.y + y) * canvas.width + (comp.x + x)];
-            }
-        }
-
-        let finalResult = "";
-        const details = [];
-
-        // 連體字分割
-        const subRegions = [];
-        if (comp.w > comp.h * 1.3) {
-            const projection = Array(comp.w).fill(0);
-            for (let x = 0; x < comp.w; x++)
-                for (let y = 0; y < comp.h; y++)
-                    if (roiData.data[y * comp.w + x] === 255) projection[x]++;
-
-            const start = Math.floor(comp.w * 0.3);
-            const end = Math.floor(comp.w * 0.7);
-            let minVal = comp.h + 1;
-            let splitX = start;
-            for (let x = start; x < end; x++)
-                if (projection[x] < minVal) { minVal = projection[x]; splitX = x; }
-
-            subRegions.push({ x: 0, w: splitX, h: comp.h });
-            subRegions.push({ x: splitX, w: comp.w - splitX, h: comp.h });
-        } else {
-            subRegions.push({ x: 0, w: comp.w, h: comp.h });
-        }
-
-        for (const sub of subRegions) {
-            if (sub.w < 5) continue;
-
-            const subData = { data: new Uint8Array(sub.w * sub.h), width: sub.w, height: sub.h };
-            for (let y = 0; y < sub.h; y++)
-                for (let x = 0; x < sub.w; x++)
-                    subData.data[y * sub.w + x] = roiData.data[y * comp.w + sub.x + x];
-
-            const processed = advancedPreprocess(subData);
-            const tensor = tf.tensor4d(processed, [1, 28, 28, 1]);
-            const prediction = model.predict(tensor);
-            const scores = await prediction.data();
-            const digit = prediction.argMax(-1).dataSync()[0];
-            const confidence = Math.max(...scores);
-
-            tensor.dispose();
-            prediction.dispose();
-
-            // 即時模式高信心閾值
-            if (isRealtime && confidence < 0.9) continue;
-
-            finalResult += digit.toString();
-            details.push({ digit, conf: `${(confidence * 100).toFixed(1)}%` });
-        }
-
-        if (finalResult) {
-            digitDisplay.innerText = finalResult;
-            digitDisplay.style.transform = "scale(1.2)";
-            setTimeout(() => { digitDisplay.style.transform = "scale(1)"; }, 300);
-            addVisualFeedback("#2ecc71");
-
-            // 畫出辨識框
-            if (isRealtime && cameraStream) {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        updateDetails(details);
+        
+        // 9. 如果是即時模式，畫出偵測框
+        if (isRealtime && cameraStream && validBoxes.length > 0) {
+            // 清除畫布（只清除框框區域）
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 重新繪製框框
+            validBoxes.forEach((box, index) => {
+                // 畫綠色框框
                 ctx.strokeStyle = "#00FF00";
                 ctx.lineWidth = 3;
-                ctx.strokeRect(comp.x, comp.y, comp.w, comp.h);
+                ctx.strokeRect(box.x, box.y, box.w, box.h);
+                
+                // 畫辨識到的數字
+                const detectedDigit = details[index] ? details[index].digit : "";
                 ctx.fillStyle = "#00FF00";
                 ctx.font = "bold 24px Arial";
-                ctx.fillText(finalResult, comp.x, comp.y - 5);
-                updatePen();
-            }
+                ctx.fillText(detectedDigit.toString(), box.x, box.y - 5);
+            });
+            
+            // 恢復畫筆設定
+            updatePen();
         }
-
-        updateDetails(deta
-
-async function realtimeCameraLoop() {
-    if (!cameraStream || isProcessing) {
-        cameraRAF = requestAnimationFrame(realtimeCameraLoop);
-        return;
+        
+        isProcessing = false;
+        return {
+            full_digit: finalResult,
+            details: details,
+            boxes: validBoxes
+        };
+        
+    } catch (error) {
+        console.error("辨識錯誤:", error);
+        digitDisplay.innerText = "❌";
+        confDetails.innerHTML = `<b>錯誤：</b>${error.message}`;
+        addVisualFeedback("#e74c3c");
+        isProcessing = false;
+        return { error: error.message };
     }
-
-    const result = await predict(true);
-
-    if (result && result.full_digit) {
-        if (result.full_digit === lastStableDigit) {
-            stableCount++;
-        } else {
-            stableCount = 1;
-            lastStableDigit = result.full_digit;
-        }
-
-        if (stableCount >= STABLE_REQUIRED) {
-            digitDisplay.innerText = lastStableDigit;
-        }
-    } else {
-        stableCount = 0;
-        lastStableDigit = "";
-        digitDisplay.innerText = "---";
-    }
-
-    cameraRAF = requestAnimationFrame(realtimeCameraLoop);
 }
-
 
 // ==================== UI 功能 ====================
 
@@ -810,55 +913,63 @@ async function toggleCamera() {
         stopCamera();
         return;
     }
-
+    
     try {
         cameraStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment" },
+            video: { 
+                facingMode: "environment",
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            },
             audio: false
         });
-
+        
         video.srcObject = cameraStream;
         video.style.display = "block";
         document.getElementById('mainBox').classList.add('cam-active');
-
-        document.getElementById('camToggleBtn').innerHTML =
-            '<span class="btn-icon">📷</span> 關閉鏡頭';
-
+        
+        const camToggleBtn = document.getElementById('camToggleBtn');
+        if (camToggleBtn) {
+            camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 關閉鏡頭';
+        }
+        
+        // 開始即時辨識
+        realtimeInterval = setInterval(async () => {
+            await predict(true);
+        }, 800); // 降低頻率以減少性能壓力
+        
         clearCanvas();
-
-        cameraRAF = requestAnimationFrame(realtimeCameraLoop);
-
+        addVisualFeedback("#9b59b6");
+        
     } catch (err) {
-        alert("無法啟動鏡頭");
-        console.error(err);
+        console.error('鏡頭啟動失敗:', err);
+        alert("無法啟動鏡頭：請確保已授予相機權限");
     }
 }
-
 
 // 停止相機
 function stopCamera() {
     if (cameraStream) {
-        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream.getTracks().forEach(track => track.stop());
         cameraStream = null;
     }
-
-    if (cameraRAF) {
-        cancelAnimationFrame(cameraRAF);
-        cameraRAF = null;
+    
+    if (realtimeInterval) {
+        clearInterval(realtimeInterval);
+        realtimeInterval = null;
     }
-
-    lastStableDigit = "";
-    stableCount = 0;
-
+    
     video.style.display = "none";
     document.getElementById('mainBox').classList.remove('cam-active');
-
-    document.getElementById('camToggleBtn').innerHTML =
-        '<span class="btn-icon">📷</span> 開啟鏡頭';
-
-    init();
+    
+    const camToggleBtn = document.getElementById('camToggleBtn');
+    if (camToggleBtn) {
+        camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
+    }
+    
+    init(); // 重新初始化畫布
+    addVisualFeedback("#34495e");
 }
-
 
 // 檔案上傳
 function triggerFile() {
@@ -1239,3 +1350,14 @@ window.addEventListener('error', function(e) {
     }
 });
 
+// TensorFlow.js 內存監控
+setInterval(() => {
+    try {
+        const memoryInfo = tf.memory();
+        if (memoryInfo.numTensors > 100) {
+            console.warn(`TensorFlow.js 內存警告: ${memoryInfo.numTensors} 個張量`);
+        }
+    } catch (e) {
+        // 忽略內存檢查錯誤
+    }
+}, 10000);
