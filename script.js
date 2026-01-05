@@ -1,6 +1,7 @@
 /**
- * 🌌 銀河手寫數字辨識系統 - 完整修復版
+ * 🌌 銀河手寫數字辨識系統 - 穩定鏡頭辨識版
  * 修復了 WebGL 錯誤和語音識別重複啟動問題
+ * 增強鏡頭辨識穩定性：解決數字跳動問題
  * 完全前端運行，無需後端伺服器
  * 修改：鏡頭辨識需信心度90%才顯示，語音辨識結果顯示在輸出格
  */
@@ -23,6 +24,16 @@ let isVoiceActive = false;
 let isProcessing = false;
 let lastX = 0;
 let lastY = 0;
+
+// ==================== 新增：穩定性控制全局變量 ====================
+let lastStableResult = "";
+let resultBuffer = [];
+const BUFFER_SIZE = 5;
+let lastValidBoxes = [];
+let lastTriggerTime = 0;
+const TRIGGER_INTERVAL = 500;
+let processingFrame = false;
+let lastFrameData = null;
 
 // ==================== Keras v3 兼容性修復 ====================
 class PatchModelLoader {
@@ -76,6 +87,77 @@ class PatchModelLoader {
             throw error;
         }
     }
+}
+
+// ==================== 新增：穩定性輔助函數 ====================
+
+// 計算兩個矩形框的重疊度（IoU）
+function calculateIOU(box1, box2) {
+    const x1 = Math.max(box1.x, box2.x);
+    const y1 = Math.max(box1.y, box2.y);
+    const x2 = Math.min(box1.x + box1.w, box2.x + box2.w);
+    const y2 = Math.min(box1.y + box1.h, box2.y + box2.h);
+    
+    const interArea = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    const box1Area = box1.w * box1.h;
+    const box2Area = box2.w * box2.h;
+    
+    return interArea / (box1Area + box2Area - interArea);
+}
+
+// 非極大值抑制（NMS）
+function nonMaximumSuppression(boxes, scores, iouThreshold = 0.5) {
+    const indices = boxes.map((_, index) => index);
+    
+    indices.sort((a, b) => scores[b] - scores[a]);
+    
+    const pick = [];
+    
+    while (indices.length > 0) {
+        const current = indices.shift();
+        pick.push(current);
+        
+        for (let i = indices.length - 1; i >= 0; i--) {
+            const idx = indices[i];
+            if (calculateIOU(boxes[current], boxes[idx]) > iouThreshold) {
+                indices.splice(i, 1);
+            }
+        }
+    }
+    
+    return pick.map(index => boxes[index]);
+}
+
+// 穩定性檢查：避免框的位置/大小跳動過大
+function isBoxStable(newBox, previousBoxes, threshold = 0.7) {
+    if (previousBoxes.length === 0) return true;
+    
+    for (const prevBox of previousBoxes) {
+        if (calculateIOU(newBox, prevBox) > threshold) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 投票函數：決定緩衝區中最穩定的結果
+function voteForStableResult(buffer) {
+    if (buffer.length < BUFFER_SIZE) return null;
+    
+    const frequency = {};
+    let maxCount = 0;
+    let stableResult = null;
+    
+    for (const result of buffer) {
+        frequency[result] = (frequency[result] || 0) + 1;
+        if (frequency[result] > maxCount) {
+            maxCount = frequency[result];
+            stableResult = result;
+        }
+    }
+    
+    // 至少需要60%的緩衝區同意
+    return maxCount >= Math.floor(BUFFER_SIZE * 0.6) ? stableResult : null;
 }
 
 // ==================== 系統初始化 ====================
@@ -559,7 +641,7 @@ function advancedPreprocess(roiImage) {
     }
 }
 
-// ==================== 主辨識函數 ====================
+// ==================== 主辨識函數 (已增強穩定性) ====================
 async function predict(isRealtime = false) {
     // 防止重複處理
     if (isProcessing || !model) return;
@@ -640,6 +722,7 @@ async function predict(isRealtime = false) {
         let finalResult = "";
         const details = [];
         const validBoxes = [];
+        const confidenceScores = [];
         
         // 7. 對每個區域進行辨識
         for (const comp of filteredComponents) {
@@ -725,12 +808,20 @@ async function predict(isRealtime = false) {
                     tensor.dispose();
                     prediction.dispose();
                     
-                    // 修改：連體字也要求信心度 > 90%
+                    // 連體字也要求信心度 > 90%
                     if (confidence > 0.9) {
                         finalResult += digit.toString();
                         details.push({
                             digit: digit,
-                            conf: `${(confidence * 100).toFixed(1)}%`
+                            conf: `${(confidence * 100).toFixed(1)}%`,
+                            rawConfidence: confidence
+                        });
+                        confidenceScores.push(confidence);
+                        validBoxes.push({
+                            x: comp.x + subRegion.x,
+                            y: comp.y,
+                            w: subRegion.w,
+                            h: subRegion.h
                         });
                     }
                 }
@@ -752,70 +843,134 @@ async function predict(isRealtime = false) {
             tensor.dispose();
             prediction.dispose();
             
-            // 修改：信心度過濾 (即時模式要求 > 90%)
-            if (isRealtime && confidence < 0.90) {
+            // **修改信心度策略：加入滯後機制**
+            const highConfidence = confidence > 0.93;
+            const mediumConfidence = confidence > 0.85;
+            
+            let shouldAccept = false;
+            if (isRealtime) {
+                // 即時模式：高信心度直接接受，中信心度需與歷史結果一致
+                shouldAccept = highConfidence || (mediumConfidence && digit.toString() === lastStableResult);
+            } else {
+                shouldAccept = confidence > 0.80;
+            }
+            
+            if (!shouldAccept) {
                 continue;
             }
             
-            // 非即時模式也要求信心度 > 80%
-            if (!isRealtime && confidence < 0.80) {
+            // **穩定性檢查：過濾位置/大小跳動過大的框**
+            const currentBox = { x: comp.x, y: comp.y, w: comp.w, h: comp.h };
+            if (isRealtime && !isBoxStable(currentBox, lastValidBoxes, 0.6)) {
                 continue;
             }
             
             finalResult += digit.toString();
             details.push({
                 digit: digit,
-                conf: `${(confidence * 100).toFixed(1)}%`
+                conf: `${(confidence * 100).toFixed(1)}%`,
+                rawConfidence: confidence
             });
-            
-            validBoxes.push({
-                x: comp.x,
-                y: comp.y,
-                w: comp.w,
-                h: comp.h
-            });
+            confidenceScores.push(confidence);
+            validBoxes.push(currentBox);
         }
         
-        // 8. 更新顯示
-        if (finalResult) {
-            digitDisplay.innerText = finalResult;
+        // **應用非極大值抑制（NMS）**
+        let nmsBoxes = [];
+        let nmsDetails = [];
+        let nmsResult = "";
+        
+        if (validBoxes.length > 0) {
+            const nmsIndices = nonMaximumSuppression(validBoxes, confidenceScores, 0.3);
             
-            // 添加動畫效果
-            digitDisplay.style.transform = "scale(1.2)";
-            setTimeout(() => {
-                digitDisplay.style.transform = "scale(1)";
-            }, 300);
-            
-            // 視覺回饋
-            addVisualFeedback("#2ecc71");
+            nmsIndices.forEach(box => {
+                const idx = validBoxes.findIndex(b => 
+                    b.x === box.x && b.y === box.y && b.w === box.w && b.h === box.h
+                );
+                if (idx !== -1) {
+                    nmsResult += details[idx].digit.toString();
+                    nmsDetails.push(details[idx]);
+                    nmsBoxes.push(box);
+                }
+            });
         } else {
+            nmsResult = finalResult;
+            nmsDetails = details;
+            nmsBoxes = validBoxes;
+        }
+        
+        // **去抖動緩衝區（Debounce Buffer）**
+        if (isRealtime && nmsResult) {
+            resultBuffer.push(nmsResult);
+            if (resultBuffer.length > BUFFER_SIZE) {
+                resultBuffer.shift();
+            }
+            
+            // **投票決定穩定輸出**
+            const voteResult = voteForStableResult(resultBuffer);
+            if (voteResult && voteResult !== lastStableResult) {
+                lastStableResult = voteResult;
+                digitDisplay.innerText = voteResult;
+                
+                // 添加動畫效果
+                digitDisplay.style.transform = "scale(1.2)";
+                setTimeout(() => {
+                    digitDisplay.style.transform = "scale(1)";
+                }, 300);
+                
+                // 視覺回饋
+                addVisualFeedback("#2ecc71");
+                lastValidBoxes = nmsBoxes; // 更新穩定的框記錄
+                updateDetails(nmsDetails);
+            } else if (!voteResult) {
+                digitDisplay.innerText = "---";
+                confDetails.innerText = "等待穩定數字入鏡...";
+            }
+        } else if (isRealtime) {
+            // 沒有偵測到有效數字
+            resultBuffer = []; // 清空緩衝區
             digitDisplay.innerText = "---";
-            if (isRealtime) {
-                confDetails.innerText = "等待有效數字入鏡 (信心度需>90%)...";
+            confDetails.innerText = "等待有效數字入鏡...";
+        } else {
+            // 非即時模式保持原有邏輯
+            if (nmsResult) {
+                digitDisplay.innerText = nmsResult;
+                
+                // 添加動畫效果
+                digitDisplay.style.transform = "scale(1.2)";
+                setTimeout(() => {
+                    digitDisplay.style.transform = "scale(1)";
+                }, 300);
+                
+                // 視覺回饋
+                addVisualFeedback("#2ecc71");
+                updateDetails(nmsDetails);
             } else {
+                digitDisplay.innerText = "---";
                 confDetails.innerText = "未偵測到有效數字";
             }
         }
         
-        updateDetails(details);
-        
-        // 9. 如果是即時模式，畫出偵測框 (只顯示信心度>90%的)
+        // 9. 如果是即時模式，畫出偵測框 (只顯示穩定的框)
         if (isRealtime && cameraStream) {
             // 清除畫布（只清除框框區域）
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            // 重新繪製框框 (只繪製信心度>90%的)
-            validBoxes.forEach((box, index) => {
-                // 畫綠色框框
-                ctx.strokeStyle = "#00FF00";
-                ctx.lineWidth = 3;
-                ctx.strokeRect(box.x, box.y, box.w, box.h);
-                
-                // 畫辨識到的數字
-                const detectedDigit = details[index] ? details[index].digit : "";
-                ctx.fillStyle = "#00FF00";
-                ctx.font = "bold 24px Arial";
-                ctx.fillText(detectedDigit.toString(), box.x, box.y - 5);
+            // 重新繪製框框 (只繪製穩定的框)
+            nmsBoxes.forEach((box, index) => {
+                // 只繪製通過穩定性檢查的框
+                if (isBoxStable(box, lastValidBoxes, 0.7)) {
+                    // 畫綠色框框
+                    ctx.strokeStyle = "#00FF00";
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(box.x, box.y, box.w, box.h);
+                    
+                    // 畫辨識到的數字
+                    const detectedDigit = nmsDetails[index] ? nmsDetails[index].digit : "";
+                    ctx.fillStyle = "#00FF00";
+                    ctx.font = "bold 24px Arial";
+                    ctx.fillText(detectedDigit.toString(), box.x, box.y - 5);
+                }
             });
             
             // 恢復畫筆設定
@@ -824,9 +979,9 @@ async function predict(isRealtime = false) {
         
         isProcessing = false;
         return {
-            full_digit: finalResult,
-            details: details,
-            boxes: validBoxes
+            full_digit: isRealtime ? lastStableResult : nmsResult,
+            details: nmsDetails,
+            boxes: nmsBoxes
         };
         
     } catch (error) {
@@ -899,6 +1054,11 @@ function clearCanvas() {
     confDetails.innerText = "🪐 畫布已清空，請重新書寫";
     addVisualFeedback("#2ecc71");
     addGalaxyEffects();
+    
+    // 重置穩定性變量
+    lastStableResult = "";
+    resultBuffer = [];
+    lastValidBoxes = [];
 }
 
 // 視覺回饋效果
@@ -914,7 +1074,7 @@ function addVisualFeedback(color) {
     });
 }
 
-// 相機功能
+// ==================== 修改後的相機功能 (智慧觸發) ====================
 async function toggleCamera() {
     if (cameraStream) {
         stopCamera();
@@ -926,7 +1086,8 @@ async function toggleCamera() {
             video: { 
                 facingMode: "environment",
                 width: { ideal: 1280 },
-                height: { ideal: 720 }
+                height: { ideal: 720 },
+                frameRate: { ideal: 30 } // 限制幀率以降低波動
             },
             audio: false
         });
@@ -940,10 +1101,61 @@ async function toggleCamera() {
             camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 關閉鏡頭';
         }
         
-        // 開始即時辨識
-        realtimeInterval = setInterval(async () => {
-            await predict(true);
-        }, 800); // 降低頻率以減少性能壓力
+        // 初始化視頻，等待幾幀以穩定
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // 改用 requestAnimationFrame 進行智慧觸發
+        lastFrameData = null;
+        processingFrame = false;
+        
+        const processVideoFrame = async () => {
+            if (!cameraStream || processingFrame) return;
+            
+            const now = Date.now();
+            // 控制觸發頻率
+            if (now - lastTriggerTime < TRIGGER_INTERVAL) {
+                requestAnimationFrame(processVideoFrame);
+                return;
+            }
+            
+            processingFrame = true;
+            
+            try {
+                // 抓取當前影片幀的簡單特徵（例如亮度直方圖）
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = video.videoWidth;
+                tempCanvas.height = video.videoHeight;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.drawImage(video, 0, 0);
+                
+                const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+                const grayArray = imageDataToGrayArray(imageData);
+                
+                // 計算平均亮度作為簡單的幀差分依據
+                let currentBrightness = 0;
+                for (let i = 0; i < grayArray.data.length; i += 100) { // 抽樣計算
+                    currentBrightness += grayArray.data[i];
+                }
+                currentBrightness = Math.round(currentBrightness / (grayArray.data.length / 100));
+                
+                // 僅在畫面亮度變化顯著（可能表示新數字進入）時觸發辨識
+                if (lastFrameData === null || Math.abs(currentBrightness - lastFrameData) > 10) {
+                    lastFrameData = currentBrightness;
+                    lastTriggerTime = now;
+                    await predict(true);
+                }
+            } catch (err) {
+                console.error("處理影片幀時出錯:", err);
+            } finally {
+                processingFrame = false;
+                if (cameraStream) {
+                    requestAnimationFrame(processVideoFrame);
+                }
+            }
+        };
+        
+        // 開始處理幀
+        processVideoFrame();
         
         clearCanvas();
         addVisualFeedback("#9b59b6");
@@ -961,11 +1173,6 @@ function stopCamera() {
         cameraStream = null;
     }
     
-    if (realtimeInterval) {
-        clearInterval(realtimeInterval);
-        realtimeInterval = null;
-    }
-    
     video.style.display = "none";
     document.getElementById('mainBox').classList.remove('cam-active');
     
@@ -974,7 +1181,21 @@ function stopCamera() {
         camToggleBtn.innerHTML = '<span class="btn-icon">📷</span> 開啟鏡頭';
     }
     
-    init(); // 重新初始化畫布
+    // 重新初始化畫布
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    updatePen();
+    
+    digitDisplay.innerText = "---";
+    confDetails.innerText = "🚀 系統就緒，請開始書寫數字";
+    
+    // 重置穩定性變量
+    lastStableResult = "";
+    resultBuffer = [];
+    lastValidBoxes = [];
+    lastFrameData = null;
+    processingFrame = false;
+    
     addVisualFeedback("#34495e");
 }
 
