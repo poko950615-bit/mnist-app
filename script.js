@@ -115,9 +115,9 @@ async function loadModel() {
         let backendToUse = 'cpu';
         try {
             // 檢查 WebGL 支持
-            const canvas = document.createElement('canvas');
-            const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || 
-                       canvas.getContext('experimental-webgl');
+            const webglCanvas = document.createElement('canvas'); // 改個名字避免衝突
+            const gl = webglCanvas.getContext('webgl2') || webglCanvas.getContext('webgl') || 
+                       webglCanvas.getContext('experimental-webgl');
             if (gl) {
                 backendToUse = 'webgl';
             }
@@ -134,10 +134,7 @@ async function loadModel() {
         
         // 如果使用 CPU，添加性能提示
         if (tf.getBackend() === 'cpu') {
-            confDetails.innerHTML = `
-                🚀 系統就緒（使用 CPU 模式）<br>
-                <small>提示：如需更佳性能，請確保瀏覽器支持 WebGL</small>
-            `;
+            confDetails.innerHTML = '🚀 系統就緒（使用 CPU 模式）<br><small>提示：如需更佳性能，請確保瀏覽器支持 WebGL</small>';
         }
         
         // 載入模型（使用修復器）
@@ -167,12 +164,7 @@ async function loadModel() {
         
     } catch (error) {
         console.error('❌ 模型載入失敗:', error);
-        confDetails.innerHTML = `
-            <span style="color: #ff4d4d">
-                ❌ 模型載入失敗<br>
-                <small>錯誤: ${error.message}</small>
-            </span>
-        `;
+        confDetails.innerHTML = '<span style="color: #ff4d4d">❌ 模型載入失敗<br><small>錯誤: ' + error.message + '</small></span>';
         return false;
     }
 }
@@ -728,7 +720,7 @@ async function predict(isRealtime = false) {
                         finalResult += digit.toString();
                         details.push({
                             digit: digit,
-                            conf: `${(confidence * 100).toFixed(1)}%`
+                            conf: ((confidence * 100).toFixed(1)) + '%'
                         });
                     }
                 }
@@ -758,7 +750,7 @@ async function predict(isRealtime = false) {
             finalResult += digit.toString();
             details.push({
                 digit: digit,
-                conf: `${(confidence * 100).toFixed(1)}%`
+                conf: ((confidence * 100).toFixed(1)) + '%'
             });
             
             validBoxes.push({
@@ -825,7 +817,7 @@ async function predict(isRealtime = false) {
     } catch (error) {
         console.error("辨識錯誤:", error);
         digitDisplay.innerText = "❌";
-        confDetails.innerHTML = `<b>錯誤：</b>${error.message}`;
+        confDetails.innerHTML = '<b>錯誤：</b>' + error.message;
         addVisualFeedback("#e74c3c");
         isProcessing = false;
         return { error: error.message };
@@ -899,7 +891,7 @@ function addVisualFeedback(color) {
     const buttons = document.querySelectorAll('.btn-container button');
     buttons.forEach(btn => {
         const originalBoxShadow = btn.style.boxShadow;
-        btn.style.boxShadow = `0 0 20px ${color}`;
+        btn.style.boxShadow = '0 0 20px ' + color;
         
         setTimeout(() => {
             btn.style.boxShadow = originalBoxShadow;
@@ -1022,7 +1014,7 @@ function updateDetails(data) {
     } else {
         data.forEach((item, i) => {
             const color = i % 2 === 0 ? "#a3d9ff" : "#ff6b9d";
-            html += `數字 ${i + 1}: <b style="color:${color}">${item.digit}</b> (信心度: ${item.conf})<br>`;
+            html += '數字 ' + (i + 1) + ': <b style="color:' + color + '">' + item.digit + '</b> (信心度: ' + item.conf + ')<br>';
         });
     }
     confDetails.innerHTML = html;
@@ -1065,7 +1057,7 @@ function initSpeechRecognition() {
         // 只有在用戶未主動關閉且重試次數未超限時才重啟
         if (isVoiceActive && retryCount < MAX_RETRIES) {
             retryCount++;
-            console.log(`嘗試重啟語音識別 (${retryCount}/${MAX_RETRIES})`);
+            console.log('嘗試重啟語音識別 (' + retryCount + '/' + MAX_RETRIES + ')');
             
             // 延遲重啟以避免衝突
             setTimeout(() => {
@@ -1087,12 +1079,7 @@ function initSpeechRecognition() {
                         if (voiceStatus) voiceStatus.style.display = 'none';
                         
                         // 通知用戶
-                        confDetails.innerHTML = `
-                            <span style="color: #f39c12">
-                                🎙️ 語音識別暫時關閉<br>
-                                <small>麥克風權限可能已被其他應用佔用</small>
-                            </span>
-                        `;
+                        confDetails.innerHTML = '<span style="color: #f39c12">🎙️ 語音識別暫時關閉<br><small>麥克風權限可能已被其他應用佔用</small></span>';
                         setTimeout(() => {
                             if (!isVoiceActive) {
                                 confDetails.innerText = "請在畫布上書寫數字";
@@ -1125,11 +1112,11 @@ function initSpeechRecognition() {
             toggleEraser();
         } else if (/^\d+$/.test(transcript)) {
             digitDisplay.innerText = transcript;
-            confDetails.innerHTML = `<b>語音輸入：</b><span style="color:#ff6b9d">${transcript}</span>`;
+            confDetails.innerHTML = '<b>語音輸入：</b><span style="color:#ff6b9d">' + transcript + '</span>';
             addVisualFeedback("#ff6b9d");
         } else {
             // 顯示其他語音指令
-            confDetails.innerHTML = `<b>語音指令：</b><span style="color:#ff6b9d">${transcript}</span>`;
+            confDetails.innerHTML = '<b>語音指令：</b><span style="color:#ff6b9d">' + transcript + '</span>';
         }
     };
     
@@ -1346,7 +1333,7 @@ document.addEventListener('DOMContentLoaded', () => {
 window.addEventListener('error', function(e) {
     console.error('全局錯誤:', e.error);
     if (confDetails) {
-        confDetails.innerHTML = `<span style="color: #ff4d4d">系統錯誤: ${e.message}</span>`;
+        confDetails.innerHTML = '<span style="color: #ff4d4d">系統錯誤: ' + e.message + '</span>';
     }
 });
 
@@ -1355,7 +1342,7 @@ setInterval(() => {
     try {
         const memoryInfo = tf.memory();
         if (memoryInfo.numTensors > 100) {
-            console.warn(`TensorFlow.js 內存警告: ${memoryInfo.numTensors} 個張量`);
+            console.warn('TensorFlow.js 內存警告: ' + memoryInfo.numTensors + ' 個張量');
         }
     } catch (e) {
         // 忽略內存檢查錯誤
