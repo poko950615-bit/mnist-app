@@ -1,7 +1,7 @@
 /**
- * 🌌 銀河手寫數字辨識系統 - Python移植鏡頭辨識版
+ * 🌌 銀河手寫數字辨識系統 - 高信心度鏡頭辨識版
  * 修復了 WebGL 錯誤和語音識別重複啟動問題
- * 移植 Python app.py 的鏡頭辨識邏輯，強化數字1的處理
+ * 鏡頭辨識信心度需 > 93% 才顯示
  * 完全前端運行，無需後端伺服器
  */
 
@@ -819,12 +819,13 @@ async function predict(isRealtime = false) {
                 tensor.dispose();
                 prediction.dispose();
                 
-                // 信心度過濾 (Python版設為0.70)
-                if (confidence > 0.70) {
+                // =========== 修改這裡：信心度過濾從 0.70 提高到 0.93 ===========
+                if (confidence > 0.93) {  // 從 0.70 改為 0.93
                     finalResult += digit.toString();
                     details.push({
                         digit: digit,
-                        conf: `${(confidence * 100).toFixed(1)}%`
+                        conf: `${(confidence * 100).toFixed(1)}%`,
+                        rawConfidence: confidence
                     });
                     
                     validBoxes.push({
@@ -833,6 +834,9 @@ async function predict(isRealtime = false) {
                         w: comp.w,
                         h: comp.h
                     });
+                } else {
+                    // 記錄低信心度的偵測
+                    console.log(`跳過數字 ${digit}，信心度 ${(confidence*100).toFixed(1)}% < 93%`);
                 }
             }
             
@@ -1002,7 +1006,7 @@ async function predict(isRealtime = false) {
                 tensor.dispose();
                 prediction.dispose();
                 
-                // 信心度過濾
+                // 信心度過濾 (手寫模式保持 0.8)
                 if (confidence > 0.8) {
                     finalResult += digit.toString();
                     details.push({
@@ -1032,34 +1036,42 @@ async function predict(isRealtime = false) {
             
             // 視覺回饋
             addVisualFeedback("#2ecc71");
+            
+            // 更新詳細資訊
+            updateDetails(details);
+            
+            if (isRealtime) {
+                confDetails.innerHTML = `<span style="color:#2ecc71">✅ 高信心度辨識: ${finalResult} (信心度 > 93%)</span>`;
+            } else {
+                confDetails.innerHTML = `<span style="color:#2ecc71">✅ 辨識完成: ${finalResult}</span>`;
+            }
         } else {
             digitDisplay.innerText = "---";
             if (isRealtime) {
-                confDetails.innerText = "正在尋找數字... (數字1優化版)";
+                confDetails.innerText = "等待高信心度數字 (>93%)...";
             } else {
                 confDetails.innerText = "未偵測到有效數字";
             }
         }
         
-        updateDetails(details);
-        
-        // 9. 如果是即時模式，畫出偵測框
+        // 9. 如果是即時模式，畫出偵測框 (只顯示信心度 > 93% 的)
         if (isRealtime && cameraStream && validBoxes.length > 0) {
-            // 清除畫布（只清除框框區域）
+            // 清除畫布
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            // 重新繪製框框
+            // 重新繪製框框 (只繪製信心度 > 93% 的)
             validBoxes.forEach((box, index) => {
                 // 畫綠色框框
                 ctx.strokeStyle = "#00FF00";
                 ctx.lineWidth = 3;
                 ctx.strokeRect(box.x, box.y, box.w, box.h);
                 
-                // 畫辨識到的數字
+                // 畫辨識到的數字和信心度
                 const detectedDigit = details[index] ? details[index].digit : "";
+                const confidence = details[index] ? details[index].conf : "";
                 ctx.fillStyle = "#00FF00";
                 ctx.font = "bold 24px Arial";
-                ctx.fillText(detectedDigit.toString(), box.x, box.y - 5);
+                ctx.fillText(`${detectedDigit} (${confidence})`, box.x, box.y - 5);
             });
             
             // 恢復畫筆設定
@@ -1190,6 +1202,7 @@ async function toggleCamera() {
         }, 800); // 降低頻率以減少性能壓力
         
         clearCanvas();
+        confDetails.innerText = "📷 鏡頭已開啟，只顯示信心度 > 93% 的數字";
         addVisualFeedback("#9b59b6");
         
     } catch (err) {
@@ -1269,10 +1282,11 @@ function handleFile(event) {
 function updateDetails(data) {
     let html = "<b>詳細辨識資訊：</b><br>";
     if (!data || data.length === 0) {
-        html += "未偵測到有效數字";
+        html += "未偵測到高信心度數字 (需 > 93%)";
     } else {
         data.forEach((item, i) => {
-            const color = i % 2 === 0 ? "#a3d9ff" : "#ff6b9d";
+            const color = item.rawConfidence > 0.95 ? "#2ecc71" : 
+                         item.rawConfidence > 0.93 ? "#f1c40f" : "#ff6b9d";
             html += `數字 ${i + 1}: <b style="color:${color}">${item.digit}</b> (信心度: ${item.conf})<br>`;
         });
     }
