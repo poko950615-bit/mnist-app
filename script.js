@@ -1,6 +1,6 @@
 /**
- * 🌌 銀河手寫數字辨識系統 - 完整修復版
- * 修復了 WebGL 錯誤和語音識別重複啟動問題
+ * 🌌 銀河手寫數字辨識系統 - OpenCV.js 增強版
+ * 使用 OpenCV.js 強化鏡頭辨識穩定性
  * 完全前端運行，無需後端伺服器
  */
 
@@ -22,6 +22,58 @@ let isVoiceActive = false;
 let isProcessing = false;
 let lastX = 0;
 let lastY = 0;
+
+// OpenCV.js 相關變量
+let isOpenCVLoaded = false;
+let openCV = null;
+
+// ==================== OpenCV.js 載入與初始化 ====================
+
+// 載入 OpenCV.js
+function loadOpenCV() {
+    return new Promise((resolve, reject) => {
+        // 檢查是否已載入
+        if (typeof cv !== 'undefined' && cv.getBuildInformation) {
+            console.log('OpenCV.js 已載入');
+            isOpenCVLoaded = true;
+            openCV = cv;
+            resolve();
+            return;
+        }
+
+        console.log('開始載入 OpenCV.js...');
+        confDetails.innerText = "🌌 正在載入電腦視覺引擎...";
+
+        // 創建 script 標籤載入 OpenCV.js
+        const script = document.createElement('script');
+        script.src = 'https://docs.opencv.org/master/opencv.js';
+        script.async = true;
+        
+        script.onload = () => {
+            console.log('OpenCV.js 載入成功');
+            
+            // 等待 OpenCV 完全初始化
+            const checkOpenCV = setInterval(() => {
+                if (typeof cv !== 'undefined' && cv.getBuildInformation) {
+                    clearInterval(checkOpenCV);
+                    isOpenCVLoaded = true;
+                    openCV = cv;
+                    console.log('OpenCV.js 版本:', cv.getBuildInformation());
+                    confDetails.innerText = "🚀 系統就緒，請開始書寫數字";
+                    resolve();
+                }
+            }, 100);
+        };
+        
+        script.onerror = () => {
+            console.error('OpenCV.js 載入失敗，將使用原生影像處理');
+            confDetails.innerText = "⚠️ OpenCV.js 載入失敗，使用原生處理";
+            resolve(); // 仍繼續執行，使用原生處理
+        };
+        
+        document.head.appendChild(script);
+    });
+}
 
 // ==================== Keras v3 兼容性修復 ====================
 class PatchModelLoader {
@@ -88,6 +140,9 @@ async function init() {
     
     // 初始化語音識別
     initSpeechRecognition();
+    
+    // 載入 OpenCV.js
+    await loadOpenCV();
     
     // 載入 TensorFlow.js 模型
     await loadModel();
@@ -558,7 +613,162 @@ function advancedPreprocess(roiImage) {
     }
 }
 
-// ==================== 主辨識函數 ====================
+// ==================== OpenCV.js 影像處理函數 ====================
+
+// 使用 OpenCV.js 處理影像
+function processImageWithOpenCV(imageData, isRealtime = false) {
+    try {
+        if (!isOpenCVLoaded || !openCV) {
+            console.log('OpenCV.js 未載入，使用原生處理');
+            return null;
+        }
+        
+        const cv = openCV;
+        const width = imageData.width;
+        const height = imageData.height;
+        
+        // 1. 將 ImageData 轉換為 OpenCV Mat
+        const src = cv.matFromImageData(imageData);
+        
+        // 2. 轉換為灰階
+        const gray = new cv.Mat();
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        
+        // 3. 高斯模糊去噪
+        const blurred = new cv.Mat();
+        cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+        
+        // 4. 自適應二值化 - 對光照變化更魯棒
+        const binary = new cv.Mat();
+        cv.adaptiveThreshold(
+            blurred, 
+            binary, 
+            255, 
+            cv.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv.THRESH_BINARY_INV, 
+            11, // 區塊大小
+            2   // 常數
+        );
+        
+        // 5. 形態學操作：閉運算填充小孔洞
+        const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+        const morph = new cv.Mat();
+        cv.morphologyEx(binary, morph, cv.MORPH_CLOSE, kernel);
+        
+        // 6. 尋找輪廓
+        const contours = new cv.MatVector();
+        const hierarchy = new cv.Mat();
+        cv.findContours(
+            morph, 
+            contours, 
+            hierarchy, 
+            cv.RETR_EXTERNAL, 
+            cv.CHAIN_APPROX_SIMPLE
+        );
+        
+        // 7. 過濾輪廓
+        const validBoxes = [];
+        const validContours = [];
+        
+        for (let i = 0; i < contours.size(); i++) {
+            const contour = contours.get(i);
+            const area = cv.contourArea(contour);
+            
+            // 過濾面積太小的輪廓
+            const MIN_AREA = isRealtime ? 300 : 100;
+            if (area < MIN_AREA) {
+                contour.delete();
+                continue;
+            }
+            
+            // 取得邊界矩形
+            const rect = cv.boundingRect(contour);
+            
+            // 過濾過於細長或寬大的輪廓
+            const aspectRatio = rect.width / rect.height;
+            if (aspectRatio > 3.0 || aspectRatio < 0.2) {
+                contour.delete();
+                continue;
+            }
+            
+            // 邊緣過濾
+            const border = 10;
+            if (rect.x < border || rect.y < border || 
+                (rect.x + rect.width) > (width - border) || 
+                (rect.y + rect.height) > (height - border)) {
+                if (area < 500) {
+                    contour.delete();
+                    continue;
+                }
+            }
+            
+            validBoxes.push({
+                x: rect.x,
+                y: rect.y,
+                w: rect.width,
+                h: rect.height,
+                contour: contour
+            });
+            validContours.push(contour);
+        }
+        
+        // 8. 按 x 座標排序（由左到右）
+        validBoxes.sort((a, b) => a.x - b.x);
+        
+        // 9. 提取 ROI 影像數據
+        const rois = [];
+        for (const box of validBoxes) {
+            // 提取 ROI 區域
+            const roi = morph.roi(new cv.Rect(box.x, box.y, box.w, box.h));
+            
+            // 轉換為 ImageData
+            const roiData = new ImageData(box.w, box.h);
+            cv.imshow(canvas, roi); // 臨時使用 canvas 顯示
+            
+            // 獲取像素數據
+            const roiCtx = canvas.getContext('2d');
+            const roiImageData = roiCtx.getImageData(0, 0, box.w, box.h);
+            
+            // 轉換為我們需要的格式
+            const dataArray = new Uint8Array(box.w * box.h);
+            for (let i = 0, j = 0; i < roiImageData.data.length; i += 4, j++) {
+                dataArray[j] = roiImageData.data[i]; // R 通道（灰階）
+            }
+            
+            rois.push({
+                data: { data: dataArray, width: box.w, height: box.h },
+                box: box
+            });
+            
+            roi.delete();
+        }
+        
+        // 10. 清理記憶體
+        src.delete();
+        gray.delete();
+        blurred.delete();
+        binary.delete();
+        morph.delete();
+        kernel.delete();
+        hierarchy.delete();
+        
+        for (const contour of validContours) {
+            contour.delete();
+        }
+        contours.delete();
+        
+        return {
+            rois: rois,
+            boxes: validBoxes.map(box => ({ x: box.x, y: box.y, w: box.w, h: box.h }))
+        };
+        
+    } catch (error) {
+        console.error('OpenCV.js 處理錯誤:', error);
+        return null;
+    }
+}
+
+// ==================== 主辨識函數 (整合 OpenCV.js) ====================
 async function predict(isRealtime = false) {
     // 防止重複處理
     if (isProcessing || !model) return;
@@ -587,158 +797,39 @@ async function predict(isRealtime = false) {
         // 獲取影像數據
         const imageData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
         
-        // 1. 轉為灰階
-        const grayImage = imageDataToGrayArray(imageData);
+        let rois = [];
+        let boxes = [];
         
-        // 2. 背景反轉檢測
-        const avgBrightness = calculateAverageBrightness(grayImage);
-        let processedGray = grayImage;
-        
-        if (avgBrightness > 120) {
-            processedGray = invertBackground(grayImage);
-        }
-        
-        // 3. 高斯模糊 (去噪)
-        const blurred = simpleGaussianBlur(processedGray);
-        
-        // 4. Otsu 二值化
-        const otsuThreshold = calculateOtsuThreshold(blurred);
-        const binaryImage = binarizeImage(blurred, otsuThreshold);
-        
-        // 5. 連通域分析
-        const components = findConnectedComponents(binaryImage);
-        
-        // 6. 過濾連通域 (完全移植自 p.py 的過濾邏輯)
-        const MIN_AREA = isRealtime ? 500 : 150;
-        const filteredComponents = [];
-        
-        for (const comp of components) {
-            // 1. 面積過小則視為雜訊
-            if (comp.area < MIN_AREA) continue;
-            
-            // 2. 排除過於細長或寬大的線條
-            if (comp.aspectRatio > 2.5 || comp.aspectRatio < 0.15) continue;
-            
-            // 3. Solidity (填滿率) 檢查
-            if (comp.solidity < 0.15) continue;
-            
-            // 4. 邊緣無效區過濾
-            const border = 8;
-            if (comp.x < border || comp.y < border || 
-                (comp.x + comp.w) > (canvas.width - border) || 
-                (comp.y + comp.h) > (canvas.height - border)) {
-                if (comp.area < 1000) continue;
+        // 選擇處理方式：優先使用 OpenCV.js
+        if (isOpenCVLoaded && cameraStream && isRealtime) {
+            // 使用 OpenCV.js 處理即時鏡頭影像
+            const result = processImageWithOpenCV(imageData, isRealtime);
+            if (result) {
+                rois = result.rois;
+                boxes = result.boxes;
+                console.log(`OpenCV.js 找到 ${rois.length} 個數字區域`);
+            } else {
+                // OpenCV 處理失敗，回退到原生處理
+                console.log('回退到原生影像處理');
+                rois = processWithNative(imageData, isRealtime);
+                boxes = extractBoxesFromRois(rois);
             }
-            
-            filteredComponents.push(comp);
+        } else {
+            // 使用原生影像處理
+            rois = processWithNative(imageData, isRealtime);
+            boxes = extractBoxesFromRois(rois);
         }
-        
-        // 排序 (由左至右)
-        filteredComponents.sort((a, b) => a.x - b.x);
         
         let finalResult = "";
         const details = [];
         const validBoxes = [];
         
-        // 7. 對每個區域進行辨識
-        for (const comp of filteredComponents) {
-            // 提取 ROI 數據
-            const roiData = {
-                data: new Uint8Array(comp.w * comp.h),
-                width: comp.w,
-                height: comp.h
-            };
+        // 對每個 ROI 進行辨識
+        for (let i = 0; i < rois.length; i++) {
+            const roi = rois[i];
             
-            // 從二值化影像中提取 ROI
-            for (let y = 0; y < comp.h; y++) {
-                for (let x = 0; x < comp.w; x++) {
-                    const srcX = comp.x + x;
-                    const srcY = comp.y + y;
-                    const srcIdx = srcY * canvas.width + srcX;
-                    const dstIdx = y * comp.w + x;
-                    roiData.data[dstIdx] = binaryImage.data[srcIdx];
-                }
-            }
-            
-            // 連體字切割邏輯 (完全移植自 p.py)
-            if (comp.w > comp.h * 1.3) {
-                // 水平投影
-                const projection = new Array(comp.w).fill(0);
-                for (let x = 0; x < comp.w; x++) {
-                    for (let y = 0; y < comp.h; y++) {
-                        const idx = y * comp.w + x;
-                        if (roiData.data[idx] === 255) {
-                            projection[x]++;
-                        }
-                    }
-                }
-                
-                // 找到分割點 (在寬度的 30%-70% 之間尋找最小值)
-                const start = Math.floor(comp.w * 0.3);
-                const end = Math.floor(comp.w * 0.7);
-                let minVal = comp.h + 1;
-                let splitX = start;
-                
-                for (let x = start; x < end; x++) {
-                    if (projection[x] < minVal) {
-                        minVal = projection[x];
-                        splitX = x;
-                    }
-                }
-                
-                // 分割成兩個子區域
-                const subRegions = [
-                    { x: 0, w: splitX, h: comp.h },
-                    { x: splitX, w: comp.w - splitX, h: comp.h }
-                ];
-                
-                for (const subRegion of subRegions) {
-                    if (subRegion.w < 5) continue;
-                    
-                    // 提取子區域
-                    const subData = {
-                        data: new Uint8Array(subRegion.w * subRegion.h),
-                        width: subRegion.w,
-                        height: subRegion.h
-                    };
-                    
-                    for (let y = 0; y < subRegion.h; y++) {
-                        for (let x = 0; x < subRegion.w; x++) {
-                            const srcX = subRegion.x + x;
-                            const srcIdx = y * comp.w + srcX;
-                            const dstIdx = y * subRegion.w + x;
-                            subData.data[dstIdx] = roiData.data[srcIdx];
-                        }
-                    }
-                    
-                    // 進階預處理
-                    const processedData = advancedPreprocess(subData);
-                    
-                    // 轉換為 Tensor 並預測
-                    const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
-                    const prediction = model.predict(tensor);
-                    const scores = await prediction.data();
-                    const digit = prediction.argMax(-1).dataSync()[0];
-                    const confidence = Math.max(...scores);
-                    
-                    tensor.dispose();
-                    prediction.dispose();
-                    
-                    if (confidence > 0.8) {
-                        finalResult += digit.toString();
-                        details.push({
-                            digit: digit,
-                            conf: `${(confidence * 100).toFixed(1)}%`
-                        });
-                    }
-                }
-                
-                continue;
-            }
-            
-            // 一般數字預測
             // 進階預處理
-            const processedData = advancedPreprocess(roiData);
+            const processedData = advancedPreprocess(roi.data);
             
             // 轉換為 Tensor 並預測
             const tensor = tf.tensor4d(processedData, [1, 28, 28, 1]);
@@ -750,8 +841,13 @@ async function predict(isRealtime = false) {
             tensor.dispose();
             prediction.dispose();
             
-            // 信心度過濾 (即時模式提高要求)
+            // 信心度過濾
             if (isRealtime && confidence < 0.85) {
+                console.log(`跳過數字 ${digit}，信心度 ${(confidence*100).toFixed(1)}% 不足`);
+                continue;
+            }
+            
+            if (!isRealtime && confidence < 0.75) {
                 continue;
             }
             
@@ -761,15 +857,13 @@ async function predict(isRealtime = false) {
                 conf: `${(confidence * 100).toFixed(1)}%`
             });
             
-            validBoxes.push({
-                x: comp.x,
-                y: comp.y,
-                w: comp.w,
-                h: comp.h
-            });
+            // 添加有效的框
+            if (boxes[i]) {
+                validBoxes.push(boxes[i]);
+            }
         }
         
-        // 8. 更新顯示
+        // 更新顯示
         if (finalResult) {
             digitDisplay.innerText = finalResult;
             
@@ -781,6 +875,15 @@ async function predict(isRealtime = false) {
             
             // 視覺回饋
             addVisualFeedback("#2ecc71");
+            
+            // 更新詳細資訊
+            updateDetails(details);
+            
+            if (isRealtime) {
+                confDetails.innerHTML = `<span style="color:#2ecc71">✅ 即時辨識: ${finalResult} (使用 ${isOpenCVLoaded ? 'OpenCV' : '原生'}處理)</span>`;
+            } else {
+                confDetails.innerHTML = `<span style="color:#2ecc71">✅ 辨識完成: ${finalResult}</span>`;
+            }
         } else {
             digitDisplay.innerText = "---";
             if (isRealtime) {
@@ -790,11 +893,9 @@ async function predict(isRealtime = false) {
             }
         }
         
-        updateDetails(details);
-        
-        // 9. 如果是即時模式，畫出偵測框
+        // 如果是即時模式，畫出偵測框
         if (isRealtime && cameraStream && validBoxes.length > 0) {
-            // 清除畫布（只清除框框區域）
+            // 清除畫布
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
             // 重新繪製框框
@@ -830,6 +931,85 @@ async function predict(isRealtime = false) {
         isProcessing = false;
         return { error: error.message };
     }
+}
+
+// 原生影像處理函數（從原始 predict 函數提取）
+function processWithNative(imageData, isRealtime) {
+    // 1. 轉為灰階
+    const grayImage = imageDataToGrayArray(imageData);
+    
+    // 2. 背景反轉檢測
+    const avgBrightness = calculateAverageBrightness(grayImage);
+    let processedGray = grayImage;
+    
+    if (avgBrightness > 120) {
+        processedGray = invertBackground(grayImage);
+    }
+    
+    // 3. 高斯模糊 (去噪)
+    const blurred = simpleGaussianBlur(processedGray);
+    
+    // 4. Otsu 二值化
+    const otsuThreshold = calculateOtsuThreshold(blurred);
+    const binaryImage = binarizeImage(blurred, otsuThreshold);
+    
+    // 5. 連通域分析
+    const components = findConnectedComponents(binaryImage);
+    
+    // 6. 過濾連通域
+    const MIN_AREA = isRealtime ? 300 : 100;
+    const filteredComponents = [];
+    
+    for (const comp of components) {
+        if (comp.area < MIN_AREA) continue;
+        if (comp.aspectRatio > 3.0 || comp.aspectRatio < 0.2) continue;
+        if (comp.solidity < 0.1) continue;
+        
+        const border = 10;
+        if (comp.x < border || comp.y < border || 
+            (comp.x + comp.w) > (canvas.width - border) || 
+            (comp.y + comp.h) > (canvas.height - border)) {
+            if (comp.area < 500) continue;
+        }
+        
+        filteredComponents.push(comp);
+    }
+    
+    // 排序 (由左至右)
+    filteredComponents.sort((a, b) => a.x - b.x);
+    
+    // 提取 ROI 數據
+    const rois = [];
+    for (const comp of filteredComponents) {
+        // 提取 ROI 數據
+        const roiData = {
+            data: new Uint8Array(comp.w * comp.h),
+            width: comp.w,
+            height: comp.h
+        };
+        
+        // 從二值化影像中提取 ROI
+        for (let y = 0; y < comp.h; y++) {
+            for (let x = 0; x < comp.w; x++) {
+                const srcX = comp.x + x;
+                const srcY = comp.y + y;
+                const srcIdx = srcY * canvas.width + srcX;
+                const dstIdx = y * comp.w + x;
+                roiData.data[dstIdx] = binaryImage.data[srcIdx];
+            }
+        }
+        
+        rois.push({
+            data: roiData,
+            box: { x: comp.x, y: comp.y, w: comp.w, h: comp.h }
+        });
+    }
+    
+    return rois;
+}
+
+function extractBoxesFromRois(rois) {
+    return rois.map(roi => roi.box);
 }
 
 // ==================== UI 功能 ====================
@@ -907,7 +1087,7 @@ function addVisualFeedback(color) {
     });
 }
 
-// 相機功能
+// ==================== 相機功能 (保持不變) ====================
 async function toggleCamera() {
     if (cameraStream) {
         stopCamera();
